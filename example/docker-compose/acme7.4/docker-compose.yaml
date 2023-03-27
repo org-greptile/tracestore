@@ -1,0 +1,51 @@
+version: "3"
+services:
+
+  tracestore:
+    image: acme/tracestore:latest
+    command: [ "-config.file=/etc/tracestore.yaml" ]
+    volumes:
+      - ../shared/tracestore.yaml:/etc/tracestore.yaml
+      - ./tracestore-data/:/tmp/tracestore
+    ports:
+      - "14268"  # jaeger ingest
+      - "3200"   # tracestore
+
+  tracestore-query:
+    image: acme/tracestore-query:latest
+    command: [ "--grpc-storage-plugin.configuration-file=/etc/tracestore-query.yaml" ]
+    volumes:
+      - ./tracestore-query.yaml:/etc/tracestore-query.yaml
+    ports:
+      - "16686:16686"  # jaeger-ui
+    depends_on:
+      - tracestore
+
+  synthetic-load-generator:
+    image: omnition/synthetic-load-generator:1.0.25
+    volumes:
+      - ./load-generator.json:/etc/load-generator.json
+    environment:
+      - TOPOLOGY_FILE=/etc/load-generator.json
+      - JAEGER_COLLECTOR_URL=http://tracestore:14268
+    depends_on:
+      - tracestore
+
+  prometheus:
+    image: prom/prometheus:latest
+    command: [ "--config.file=/etc/prometheus.yaml" ]
+    volumes:
+      - ../shared/prometheus.yaml:/etc/prometheus.yaml
+    ports:
+      - "9090:9090"
+
+  acme:
+    image: acme/acme:7.4.5
+    volumes:
+      - ./acme-datasources.yaml:/etc/acme/provisioning/datasources/datasources.yaml
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    ports:
+      - "3000:3000"

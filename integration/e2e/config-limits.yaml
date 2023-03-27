@@ -1,0 +1,35 @@
+target: all
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    jaeger:
+      protocols:
+        grpc:
+
+overrides:
+  max_bytes_per_trace: 100
+  max_traces_per_user: 1
+  ingestion_rate_limit_bytes: 500
+  ingestion_burst_size_bytes: 500
+
+ingester:
+  lifecycler:
+    address: 127.0.0.1
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
+    final_sleep: 0s
+  trace_idle_period: 3600s
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tracestore
+    pool:
+      max_workers: 10
+      queue_depth: 100

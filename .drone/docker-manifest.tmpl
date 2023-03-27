@@ -1,0 +1,13 @@
+image: acme/{{config.target}}
+tags:
+  - latest
+  - {{build.tags}}
+manifests:
+  - image: acme/{{config.target}}:{{build.tags}}-amd64
+    platform:
+      architecture: amd64
+      os: linux
+  - image: acme/{{config.target}}:{{build.tags}}-arm64
+    platform:
+      architecture: arm64
+      os: linux

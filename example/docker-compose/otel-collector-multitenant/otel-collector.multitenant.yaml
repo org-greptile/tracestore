@@ -1,0 +1,16 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+exporters:
+  otlp:
+    endpoint: tracestore:4317
+    tls:
+      insecure: true
+    headers:
+      x-scope-orgid: foo-bar-baz
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlp]

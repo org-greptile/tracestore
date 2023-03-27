@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ingester
+  namespace: tracing
+spec:
+  podManagementPolicy: Parallel
+  replicas: 10
+  selector:
+    matchLabels:
+      app: ingester
+      name: ingester
+      tracestore-gossip-member: "true"
+  serviceName: ingester
+  template:
+    metadata:
+      annotations:
+        config_hash: b9f7e4635447322231244804b290b00f
+      labels:
+        app: ingester
+        name: ingester
+        tracestore-gossip-member: "true"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                name: ingester
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - args:
+        - -config.file=/conf/tracestore.yaml
+        - -mem-ballast-size-mbs=1024
+        - -target=ingester
+        image: acme/tracestore:latest
+        imagePullPolicy: IfNotPresent
+        name: ingester
+        ports:
+        - containerPort: 3200
+          name: prom-metrics
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3200
+          initialDelaySeconds: 15
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: "5"
+            memory: 5Gi
+          requests:
+            cpu: "3"
+            memory: 3Gi
+        volumeMounts:
+        - mountPath: /conf
+          name: tracestore-conf
+        - mountPath: /var/tracestore
+          name: ingester-data
+        - mountPath: /overrides
+          name: overrides
+      terminationGracePeriodSeconds: 1200
+      volumes:
+      - configMap:
+          name: tracestore-ingester
+        name: tracestore-conf
+      - configMap:
+          name: tracestore-overrides
+        name: overrides
+  updateStrategy:
+    type: RollingUpdate
+  volumeClaimTemplates:
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      labels:
+        app: ingester
+      name: ingester-data
+      namespace: tracing
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+      storageClassName: fast

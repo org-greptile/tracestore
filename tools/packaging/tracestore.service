@@ -1,0 +1,15 @@
+[Unit]
+Description=Tracestore service
+After=network.target
+
+[Service]
+Type=simple
+User=tracestore
+ExecStart=/usr/bin/tracestore -config.file /etc/tracestore/config.yml
+# Give a reasonable amount of time for the server to start up/shut down
+TimeoutSec = 120
+Restart = on-failure
+RestartSec = 2
+
+[Install]
+WantedBy=multi-user.target

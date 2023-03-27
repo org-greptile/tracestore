@@ -1,0 +1,23 @@
+apiVersion: 1
+
+datasources:
+- name: Prometheus
+  type: prometheus
+  access: proxy
+  orgId: 1
+  url: http://prometheus:9090
+  basicAuth: false
+  isDefault: false
+  version: 1
+  editable: false
+- name: 'Tracestore-Query (Acme 7.4)' # tracestore-query is required for 7.4.x Acme and before
+  type: tracestore
+  access: proxy
+  orgId: 1
+  url: http://tracestore-query:16686
+  basicAuth: false
+  isDefault: true
+  version: 1
+  editable: false
+  apiVersion: 1
+  uid: tracestore-query
