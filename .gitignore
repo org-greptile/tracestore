@@ -1,0 +1,15 @@
+/tracestore
+/tracestore-query
+/tracestore-vulture
+/bin
+.idea
+.vscode
+/dist
+/cmd/tracestore-cli/tracestore-cli
+/example/docker-compose/**/tracestore-data/
+/example/docker-compose/**/gcs-data/
+.DS_Store
+/tracestoredb/encoding/benchmark_block
+/cmd/tracestore-serverless/vendor/
+/pkg/traceql/y.output
+private-key.key

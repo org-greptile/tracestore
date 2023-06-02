@@ -1,0 +1,8 @@
+{
+  "context": {
+    "repos": [
+      "org-greptile/kit",
+      "org-greptile/logstore"
+    ]
+  }
+}

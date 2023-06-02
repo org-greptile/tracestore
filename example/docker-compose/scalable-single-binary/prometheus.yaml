@@ -1,0 +1,17 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: [ 'localhost:9090' ]
+  - job_name: 'tracestore'
+    static_configs:
+      - targets:
+        - 'tracestore1:3200'
+        - 'tracestore2:3200'
+        - 'tracestore3:3200'
+  - job_name: 'vulture'
+    static_configs:
+      - targets: [ 'vulture:3201' ]

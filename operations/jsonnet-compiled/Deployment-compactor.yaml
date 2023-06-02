@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compactor
+  namespace: tracing
+spec:
+  minReadySeconds: 10
+  replicas: 5
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: compactor
+      name: compactor
+  strategy:
+    rollingUpdate:
+      maxSurge: 50%
+      maxUnavailable: 100%
+  template:
+    metadata:
+      annotations:
+        config_hash: 6eb438b3ed5c9d479d974627acab1417
+      labels:
+        app: compactor
+        name: compactor
+    spec:
+      containers:
+      - args:
+        - -config.file=/conf/tracestore.yaml
+        - -mem-ballast-size-mbs=1024
+        - -target=compactor
+        env:
+        - name: GOMEMLIMIT
+          value: 5GiB
+        image: acme/tracestore:latest
+        imagePullPolicy: IfNotPresent
+        name: compactor
+        ports:
+        - containerPort: 3200
+          name: prom-metrics
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3200
+          initialDelaySeconds: 15
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: "1"
+            memory: 5Gi
+          requests:
+            cpu: 500m
+            memory: 3Gi
+        volumeMounts:
+        - mountPath: /conf
+          name: tracestore-conf
+        - mountPath: /overrides
+          name: overrides
+      volumes:
+      - configMap:
+          name: tracestore-compactor
+        name: tracestore-conf
+      - configMap:
+          name: tracestore-overrides
+        name: overrides
