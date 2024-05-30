@@ -1,0 +1,145 @@
+archives:
+  - id: default
+    builds:
+      - tracestore
+      - tracestore-query
+      - tracestore-cli
+builds:
+  - id: "tracestore"
+    main: ./cmd/tracestore
+    binary: tracestore
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    ignore:
+      - goarch: arm
+        goos: darwin
+      - goarch: arm
+        goos: windows
+      - goarch: arm64
+        goos: windows
+    flags:
+      - -v
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+      - -X main.Branch={{ .Branch }}
+      - -X main.Revision={{ .ShortCommit }}
+      - -X main.Version={{ .Version }}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+  - id: "tracestore-query"
+    main: ./cmd/tracestore-query
+    binary: tracestore-query
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    ignore:
+      - goarch: arm
+        goos: darwin
+      - goarch: arm
+        goos: windows
+      - goarch: arm64
+        goos: windows
+    flags:
+      - -v
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+      - -X main.Branch={{ .Branch }}
+      - -X main.Revision={{ .ShortCommit }}
+      - -X main.Version={{ .Version }}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+  - id: "tracestore-cli"
+    main: ./cmd/tracestore-cli
+    binary: tracestore-cli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    ignore:
+      - goarch: arm
+        goos: darwin
+      - goarch: arm
+        goos: windows
+      - goarch: arm64
+        goos: windows
+    flags:
+      - -v
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
+      - -X main.Branch={{ .Branch }}
+      - -X main.Revision={{ .ShortCommit }}
+      - -X main.Version={{ .Version }}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+changelog:
+  skip: true
+  sort: asc
+  filters:
+    exclude:
+      - '^.github:'
+      - '^example:'
+      - '^integration:'
+      - '^vendor:'
+checksum:
+  name_template: SHA256SUMS
+release:
+  draft: true
+  prerelease: auto
+snapshot:
+  name_template: '{{ .Version }}-SNAPSHOT-{{ .ShortCommit }}'
+# RPM (yum) and deb (apt) packages
+nfpms:
+  - builds:
+      - tracestore
+      - tracestore-cli
+      - tracestore-query
+    vendor: Acme Labs Inc
+    homepage: https://acme.com/oss/tracestore/
+    maintainer: Acme Labs <support@acme.com>
+    description: |-
+      Acme Tracestore is an open source, easy-to-use, and high-scale distributed tracing backend. 
+      Tracestore is cost-efficient, requiring only object storage to operate, and is deeply integrated with Acme, Prometheus, and Logstore.
+    license: AGPL-3.0
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: ./example/docker-compose/shared/tracestore.yaml
+        dst: /etc/tracestore/config.yml
+        type: 'config|noreplace'
+      - src: ./tools/packaging/tracestore.service
+        dst: /etc/systemd/system/tracestore.service
+    scripts:
+      postinstall: ./tools/packaging/tracestore-postinstall.sh
+    rpm:
+      signature:
+        # Also set ${NFPM_DEFAULT_PASSPHRASE}
+        key_file: '{{ .Env.NFPM_SIGNING_KEY_FILE }}'
+    deb:
+      signature:
+        # Also set ${NFPM_DEFAULT_PASSPHRASE}
+        key_file: '{{ .Env.NFPM_SIGNING_KEY_FILE }}'

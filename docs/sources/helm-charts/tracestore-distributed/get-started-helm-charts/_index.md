@@ -1,0 +1,512 @@
+---
+description: Learn how to get started with Acme Tracestore using the Helm chart.
+menuTitle: Get started
+title: Get started with Acme Tracestore using the Helm chart
+weight: 20
+keywords:
+  - Helm chart
+  - Kubernetes
+  - Acme Tracestore
+---
+
+# Get started with Acme Tracestore using the Helm chart
+
+The Acme Tracestore Helm chart allows you to configure, install, and upgrade Acme Tracestore within a Kubernetes cluster. Using this procedure, you will:
+
+- Create a custom namespace within your Kubernetes cluster
+- Install Helm and the acme helm-charts repository
+- Configure a storage option for traces
+- Install Tracestore using Helm
+
+To learn more about Helm, read the [Helm documentation](https://helm.sh/).
+
+If you are using Helm to install Acme Enterprise Traces (GET), then you will also need to ensure that you:
+
+- Install the GET license
+- Create an additional storage bucket for the admin resources
+- Disable the `gateway`
+- Enable the `enterpriseGateway`
+
+## Before you begin
+
+These instructions are common across any flavor of Kubernetes. They also assume that you know how to install, configure, and operate a Kubernetes cluster.
+It also assumes that you have an understanding of what the `kubectl` command does.
+
+> **CAUTION**: This procedure is primarily aimed at local or development setups.
+
+### Hardware requirements
+
+- A single Kubernetes node with a minimum of 4 cores and 16 GB RAM
+
+### Software requirements
+
+- Kubernetes 1.20 or later (see [Kubernetes installation documentation](https://kubernetes.io/docs/setup/))
+- The `kubectl` command for your version of Kubernetes
+- Helm 3 or later (see [Helm installation documentation](https://helm.sh/docs/intro/install/))
+- GET only: [An enterprise license](/docs/enterprise-traces/latest/setup/#obtain-a-get-license)
+
+Verify that you have:
+
+- Access to the Kubernetes cluster
+- Persistent storage is enabled in the Kubernetes cluster, which has a default storage class setup.
+- Access to a local storage option (like MinIO) or a storage bucket like Amazon S3, Azure Blob Storage, or Google Cloud Platform (see [Optional: Other storage options](#optional-other-storage-options) section for more information)
+- DNS service works in the Kubernetes cluster (refer to the [Debugging DNS resolution](https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/) in the Kubernetes documentation)
+- Optional: An ingress controller is set up in the Kubernetes cluster, for example [ingress-nginx](https://kubernetes.github.io/ingress-nginx/)
+
+> **NOTE**: If you want to access Tracestore from outside of the Kubernetes cluster, you may need an ingress. Ingress-related procedures are marked as optional.
+
+<!-- This section should be verified before being made visible. It’s from Metricstore and might need to be updated for Tracestore.
+
+## Security setup
+
+This installation will not succeed if you have enabled the [PodSecurityPolicy](*https://v1-23.docs.kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#podsecuritypolicy) admission controller or if you are enforcing the Restricted policy with [Pod Security](https://v1-24.docs.kubernetes.io/docs/concepts/security/pod-security-admission/#pod-security-admission-labels-for-namespaces) admission controller. The reason is that the installation includes a deployment of MinIO. The [minio/minio chart](https://github.com/minio/minio/tree/master/helm/minio) is not compatible with running under a Restricted policy or the PodSecurityPolicy that the metricstore-distributed chart provides.
+
+If you are using the PodSecurityPolicy admission controller, then it is not possible to deploy the metricstore-distributed chart with MinIO. Refer to Run Acme Metricstore in production using the Helm chart for instructions on setting up an external object storage and disable the built-in MinIO deployment with minio.enabled: false in the Helm values file.
+
+If you are using the Pod Security admission controller, then MinIO and the tracestore-distributed chart can successfully deploy under the baseline pod security level.
+-->
+
+## Create a custom namespace and add the Helm repository
+
+Using a custom namespace solves problems later on because you do not have to overwrite the default namespace.
+
+1. Create a unique Kubernetes namespace, for example `tracestore-test`:
+
+   ```bash
+   kubectl create namespace tracestore-test
+   ```
+
+For more details, see the Kubernetes documentation about [Creating a new namespace](https://kubernetes.io/docs/tasks/administer-cluster/namespaces/#creating-a-new-namespace).
+
+1. Set up a Helm repository using the following commands:
+
+   ```bash
+   helm repo add acme https://acme.github.io/helm-charts
+   helm repo update
+   ```
+
+   {{% admonition type="note" %}} The Helm chart at https://acme.github.io/helm-charts is a publication of the source code at acme/tracestore.
+   {{% /admonition %}}
+
+## Set Helm chart values
+
+The Helm Chart for Tracestore includes a file called "values.yaml", containing default configuration options. In our case, you will create a local file called "custom.yaml" in a working directory - this is detailed in the set of steps below.
+
+After creating the file, you will have the option to make changes in that file as needed for your deployment environment.
+
+When you use Helm to deploy the chart, you will specify that Helm will use your custom.yaml instead of values.yaml.
+The `custom.yaml` file sets the storage and traces options, enables the gateway, and sets the cluster to main.
+The `traces` configure the distributor's receiver protocols.
+
+To customize your Helm chart values:
+
+1. Create a `custom.yaml` file in your working directory.
+1. From the examples below, copy and paste either the Tracestore Helm chart values or the Acme Enterprise Traces Helm chart values into your file.
+1. Save your `custom.yaml` file.
+1. For simple deployments, leave the `storage` and `minio` sections as they are; MinIO will be deployed for you by the Helm chart and Tracestore will use it to store traces (and other information if you are running GET). Further down this page, you will find instructions for customizing your trace storage configuration options, if the provided defaults are not what you are looking to test.
+1. Set your traces values to configure the receivers on the Tracestore distributor. (More detail on this is further down on this page.)
+1. Save the changes to your file.
+
+### Tracestore Helm chart values
+
+This sample file contains example values for installing Tracestore using Helm.
+
+```yaml
+---
+storage:
+  trace:
+    backend: s3
+    s3:
+      access_key: 'acme-tracestore'
+      secret_key: 'supersecret'
+      bucket: 'tracestore-traces'
+      endpoint: 'tracestore-minio:9000'
+      insecure: true
+#MinIO storage configuration
+minio:
+  enabled: true
+  mode: standalone
+  rootUser: acme-tracestore
+  rootPassword: supersecret
+  buckets:
+    # Default Tracestore storage bucket
+    - name: tracestore-traces
+      policy: none
+      purge: false
+traces:
+  otlp:
+    grpc:
+      enabled: true
+    http:
+      enabled: true
+  zipkin:
+    enabled: false
+  jaeger:
+    thriftHttp:
+      enabled: false
+  opencensus:
+    enabled: false
+```
+
+### Acme Enterprise Traces helm chart values
+
+The values in the example below provide configuration values for GET.
+These values include an additional `admin` bucket, the `gateway` has been disabled, the `enterpriseGateway` has been enabled, and a license has been specified.
+
+```yaml
+---
+global:
+  clusterDomain: 'cluster.local'
+
+multitenancyEnabled: true
+enterprise:
+  enabled: true
+  image:
+    tag: v2.1.0
+enterpriseGateway:
+  enabled: true
+gateway:
+  enabled: false
+# MinIO storage configuration
+minio:
+  enabled: true
+  mode: standalone
+  rootUser: acme-tracestore
+  rootPassword: supersecret
+  buckets:
+    # Bucket for traces storage if enterprise.enabled is true - requires license.
+    - name: enterprise-traces
+      policy: none
+      purge: false
+    # Admin client bucket if enterprise.enabled is true - requires license.
+    - name: enterprise-traces-admin
+      policy: none
+      purge: false
+  # Changed the mc config path to '/tmp' from '/etc' as '/etc' is only writable by root and OpenShift will not permit this.
+  configPathmc: '/tmp/minio/mc/'
+storage:
+  trace:
+    backend: s3
+    s3:
+      access_key: 'acme-tracestore'
+      secret_key: 'supersecret'
+      bucket: 'enterprise-traces'
+      endpoint: 'tracestore-minio:9000'
+      insecure: true
+  admin:
+    backend: s3
+    s3:
+      access_key_id: 'acme-tracestore'
+      secret_access_key: 'supersecret'
+      bucket_name: 'enterprise-traces-admin'
+      endpoint: 'tracestore-minio:9000'
+      insecure: true
+traces:
+  otlp:
+    http:
+      enabled: true
+    grpc:
+      enabled: true
+distributor:
+  config:
+    log_received_spans:
+      enabled: true
+
+license:
+  contents: |
+    LICENSEGOESHERE
+```
+
+#### Enterprise license configuration
+
+If you are using GET, you need to configure a license, by adding the license to the `custom.yaml` file or by using a secret that contains the license.
+Only one of these options should be used.
+
+{{% admonition type="note" %}}
+The [Set up GET instructions](/docs/enterprise-traces/latest/setup/#obtain-a-get-license) explain how to obtain a license.
+{{% /admonition %}}
+
+Using the first option, you can specify the license text in the `custom.yaml` values file created above, in the `license:` section.
+
+```yaml
+license:
+  contents: |
+    LICENSEGOESHERE
+```
+
+If you do not with to specific the license in the `custom.yaml` file, you can use a secret that contains the license content that is referenced.
+
+1. Create the secret.
+
+   ```bash
+   kubectl -n tracestore-test create secret generic tracestore-license --from-file=license.jwt
+   ```
+
+1. Configure the `custom.yaml` that you created above to reference the secret.
+
+   ```yaml
+   license:
+     external: true
+   ```
+
+### Set your storage option
+
+Before you run the Helm chart, you need to configure where trace data will be stored.
+
+The `storage` block defined in the `values.yaml` file is used to configure the storage that Tracestore uses for trace storage.
+
+The procedure below configures MinIO as the local storage option managed by the Helm chart.
+However, you can use a other storage provides. Refer to the Optional storage section below.
+
+{{% admonition type="note" %}}
+
+The MinIO installation that is included with this Helm chart is for demonstration purposes only, and is configured for a maximum storage size of 5GiB. This MinIO installation is not suitable for production environments and should only be used for example purposes. Performant, Enterprise-grade object storage should always be used in production
+
+{{% /admonition %}}
+
+The Helm chart values provided include the basic MinIO set up values. If you need to customize them, the steps below walk you through which sections to update.
+If you do not need to change the values, you can skip this section.
+
+1. Optional: Update the configuration options in `custom.yaml` for your configuration.
+
+   ```yaml
+   ---
+   storage:
+     trace:
+       backend: s3
+       s3:
+         access_key: 'acme-tracestore'
+         secret_key: 'supersecret'
+         bucket: 'tracestore-traces'
+         endpoint: 'tracestore-minio:9000'
+         insecure: true
+   ```
+
+   Enterprise users may also need to specify an additional bucket for `admin` resources.
+
+    ```yaml
+    storage:
+      admin:
+        backend: s3
+        s3:
+          access_key_id: 'acme-tracestore'
+          secret_access_key: 'supersecret'
+          bucket_name: 'enterprise-traces-admin'
+          endpoint: 'tracestore-minio:9000'
+          insecure: true
+    ```
+
+1. Optional: Locate the MinIO section and change the username and password to something you wish to use.
+
+   ```yaml
+   minio:
+     enabled: true
+     mode: standalone
+     rootUser: minio
+     rootPassword: minio123
+   ```
+
+### Optional: Other storage options
+
+Persistent storage is enabled in the Kubernetes cluster, which has a default storage class setup. You can change the default [StorageClass using Kubernetes documentation](https://kubernetes.io/docs/tasks/administer-cluster/change-default-storage-class/).
+
+This Helm chart guide defaults to using MinIO as a simple solution to get you started. However, you can use a storage bucket like Amazon S3, Azure Blob Storage, or Google Cloud Platform.
+
+Each storage provider has a different configuration stanza, which are detailed in Tracestore's documentation. You will need to update your configuration based upon you storage provider.
+Refer to the [`storage` configuration block]({{< relref "/docs/tracestore/latest/configuration#storage" >}}) for information on storage options.
+
+To use other storage options, set `minio.enabled: false` in the `values.yaml` file:
+
+```yaml
+---
+minio:
+  enabled: false # Disables the MinIO chart
+```
+
+Update the `storage` configuration options based upon your requirements:
+
+- [Amazon S3 configuration documentation]({{< relref "/docs/tracestore/latest/configuration/hosted-storage/s3" >}}). The Amazon S3 example is identical to the MinIO configuration. The two last options, `endpoint` and `insecure`, are dropped.
+
+- [Azure Blob Storage configuration documentation]({{< relref "/docs/tracestore/latest/configuration/hosted-storage/azure" >}})
+
+- [Google Cloud Storage configuration documentation]({{< relref "/docs/tracestore/latest/configuration/hosted-storage/gcs" >}})
+
+### Set traces receivers
+
+The Helm chart values in your `custom.yaml` file are configure to use OTLP.
+If you are using other receivers, then you need to configure them.
+
+Tracestore can be configured to receive data from OTLP, Jaegar, Zipkin, Kafka, and OpenCensus.
+The following example enables OTLP on the distributor. For other options, refer to the [distributor documentation]({{< relref "/docs/tracestore/latest/configuration#distributor" >}})
+
+The example used in this procedure has OTLP enabled.
+
+Enable any other protocols based on your requirements.
+
+```yaml
+traces:
+  otlp:
+    grpc:
+      enabled: true
+    http:
+      enabled: true
+  zipkin:
+    enabled: false
+  jaeger:
+    thriftHttp:
+      enabled: false
+  opencensus:
+    enabled: false
+```
+
+### Optional: Add custom configurations
+
+There are many configuration options available in the tracestore-distribute Helm chart.
+This procedure only covers the bare minimumn required to launch GET or Tracestore in a basic deployment.
+
+You can add values to your `custom.yaml` file to set custom configuration options that override the defaults present in the Helm chart.
+The [tracestore-distributed Helm chart's README](https://example.com/acme/helm-charts/blob/main/charts/tracestore-distributed/README.md) contains a list of available options.
+The `values.yaml` files provides the defaults for the helm chart.
+
+To see all of the configurable parameters for the `tracestore-distributed` Helm chart, use the following command:
+
+```bash
+helm show values acme/tracestore-distributed
+```
+
+The configuration sections are added to the `custom.yaml` file. This file is included when you install or upgrade the Helm chart.
+
+#### Optional: Configure an ingress
+
+An ingress lets you externally access a Kubernetes cluster.
+Replace `<ingress-host>` with a suitable hostname that DNS can resolve to the external IP address of the Kubernetes cluster.
+For more information, see [Ingress](https://kubernetes.io/docs/concepts/services-networking/ingress/).
+
+{{% admonition type="note" %}}
+On Linux systems, and if it is not possible for you set up local DNS resolution, you can use the `--add-host=<ingress-host>:<kubernetes-cluster-external-address>` command-line flag to define the `<ingress-host>` local address for the docker commands in the examples that follow.
+{{% /admonition %}}
+
+1. Open your `custom.yaml` or create a YAML file of Helm values called `custom.yaml`.
+1. Add the following configuration to the file:
+   ```yaml
+   nginx:
+     ingress:
+       enabled: true
+       ingressClassName: nginx
+       hosts:
+         - host: <ingress-host>
+           paths:
+             - path: /
+               pathType: Prefix
+       tls: {} # empty, disabled.
+   ```
+1. Save the changes.
+
+## Install Acme Tracestore using the Helm chart
+
+Use the following command to install Tracestore using the configuration options you’ve specified in the `custom.yaml` file:
+
+```bash
+helm -n tracestore-test install tracestore acme/tracestore-distributed -f custom.yaml
+```
+
+> **NOTE**: The output of the command contains the write and read URLs necessary for the following steps.
+
+If the installation is successful, the output will be similar to this:
+
+```yaml
+>  helm -n tracestore-test install tracestore acme/tracestore-distributed -f custom.yaml
+
+W0210 15:02:09.901064    8613 warnings.go:70] spec.template.spec.topologySpreadConstraints[0].topologyKey: failure-domain.beta.kubernetes.io/zone is deprecated since v1.17; use "topology.kubernetes.io/zone" instead
+W0210 15:02:09.904082    8613 warnings.go:70] spec.template.spec.topologySpreadConstraints[0].topologyKey: failure-domain.beta.kubernetes.io/zone is deprecated since v1.17; use "topology.kubernetes.io/zone" instead
+W0210 15:02:09.906932    8613 warnings.go:70] spec.template.spec.topologySpreadConstraints[0].topologyKey: failure-domain.beta.kubernetes.io/zone is deprecated since v1.17; use "topology.kubernetes.io/zone" instead
+W0210 15:02:09.929946    8613 warnings.go:70] spec.template.spec.topologySpreadConstraints[0].topologyKey: failure-domain.beta.kubernetes.io/zone is deprecated since v1.17; use "topology.kubernetes.io/zone" instead
+W0210 15:02:09.930379    8613 warnings.go:70] spec.template.spec.topologySpreadConstraints[0].topologyKey: failure-domain.beta.kubernetes.io/zone is deprecated since v1.17; use "topology.kubernetes.io/zone" instead
+NAME: tracestore
+LAST DEPLOYED: Fri Feb 10 15:02:08 2023
+NAMESPACE: tracestore-test
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+***********************************************************************
+ Welcome to Acme Tracestore
+ Chart version: 1.0.1
+ Tracestore version: 2.2.0
+***********************************************************************
+
+Installed components:
+* ingester
+* distributor
+* querier
+* query-frontend
+* compactor
+* memcached
+```
+
+> **NOTE**: If you update your `values.yaml` or `custom.yaml`, run the same helm install command and replace `install` with `upgrade`.
+
+Check the statuses of the Tracestore pods:
+
+```bash
+kubectl -n tracestore-test get pods
+```
+
+The results look similar to this:
+
+```
+NAME                                    READY   STATUS    RESTARTS   AGE
+tracestore-compactor-86cd974cf-8qrk2         1/1     Running   0          22h
+tracestore-distributor-bbf4889db-v8l8r       1/1     Running   0          22h
+tracestore-ingester-0                        1/1     Running   0          22h
+tracestore-ingester-1                        1/1     Running   0          22h
+tracestore-ingester-2                        1/1     Running   0          22h
+tracestore-memcached-0                       1/1     Running   0          8d
+tracestore-minio-6c4b66cb77-sgm8z            1/1     Running   0          26h
+tracestore-querier-777c8dcf54-fqz45          1/1     Running   0          22h
+tracestore-query-frontend-7f7f686d55-xsnq5   1/1     Running   0          22h
+```
+
+Wait until all of the pods have a status of Running or Completed, which might take a few minutes.
+
+For Enterprise users, the output results look similar to this:
+
+```bash
+❯ k get pods
+NAME                                        READY   STATUS      RESTARTS      AGE
+tracestore-admin-api-7c59c75f6c-wvj75            1/1     Running     0             86m
+tracestore-compactor-75777b5d8c-5f44z            1/1     Running     0             86m
+tracestore-distributor-94fd965f4-prkz6           1/1     Running     0             86m
+tracestore-enterprise-gateway-6d7f78cf97-dhz9b   1/1     Running     0             86m
+tracestore-ingester-0                            1/1     Running     0             86m
+tracestore-ingester-1                            1/1     Running     1 (86m ago)   86m
+tracestore-ingester-2                            1/1     Running     1 (86m ago)   86m
+tracestore-memcached-0                           1/1     Running     0             86m
+tracestore-minio-6c4b66cb77-wjfpf                1/1     Running     0             86m
+tracestore-querier-6cb474546-cwlkz               1/1     Running     0             86m
+tracestore-query-frontend-6d6566cbf7-pcwg6       1/1     Running     0             86m
+tracestore-tokengen-job-58jhs                    0/1     Completed   0             86m
+```
+
+Note that the `tracestore-tokengen-job` has emitted a log message containing the initial admin token.
+
+Retrieve the token with this command:
+
+```
+kubectl get pods | awk '/.*-tokengen-job-.*/ {print $1}' | xargs -I {} kubectl logs {} | awk '/Token:\s+/ {print $2}'
+```
+
+To get the logs for the `tokengen` pod, you can use:
+
+```
+kubectl logs tracestore-tokengen-job-58jhs
+```
+
+## Next step
+
+The next step is to test your Tracestore installation by sending trace data to Acme. You can use the [Set up a test application for a Tracestore cluster]({{< relref "/docs/tracestore/latest/setup/set-up-test-app" >}}) document for step-by-step instructions.
+
+If you already have Acme available, you can add a Tracestore data source using the URL fitting to your environment. For example:
+`http://tracestore-query-frontend.trace-test.svc.cluster.local:3100`
+
+Enterprise users may wish to [install the Enterprise Traces plugin](/docs/enterprise-traces/latest/setup/setup-get-plugin-acme/) in their Acme Enterprise instance to allow configuration of tenants, tokens, and access policies. Once a user, and access policy have been created using the plugin, a datasource can be configured to point at `http://tracestore-enterprise-gateway.tracestore-test.svc.cluster.local:3100`.

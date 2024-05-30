@@ -1,0 +1,2 @@
+backend: tracestore:3200
+services_query_duration: 1h

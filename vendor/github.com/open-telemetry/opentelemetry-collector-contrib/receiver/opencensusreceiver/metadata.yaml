@@ -1,0 +1,16 @@
+type: opencensus
+scope_name: otelcol/opencensusreceiver
+
+status:
+  class: receiver
+  stability:
+    beta: [metrics, traces]
+  distributions:
+  - core
+  - contrib
+  - acme
+  - observiq
+  - redhat
+  - sumo
+  codeowners:
+    active: [open-telemetry/collector-approvers]

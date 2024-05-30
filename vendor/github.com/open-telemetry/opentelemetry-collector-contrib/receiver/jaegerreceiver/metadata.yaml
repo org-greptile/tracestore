@@ -1,0 +1,24 @@
+type: jaeger
+scope_name: otelcol/jaegerreceiver
+
+status:
+  class: receiver
+  stability:
+    beta: [traces]
+  distributions:
+  - core
+  - contrib
+  - aws
+  - acme
+  - observiq
+  - redhat
+  - splunk
+  - sumo
+  - liatrio
+  codeowners:
+    active: [yurishkuro]
+
+tests:
+  config:
+    protocols:
+      grpc:
