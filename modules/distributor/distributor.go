@@ -1,0 +1,808 @@
+package distributor
+
+import (
+	"context"
+	"encoding/hex"
+	"fmt"
+	"math"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
+	"github.com/gogo/status"
+	"example.com/acme/kit/limiter"
+	dslog "example.com/acme/kit/log"
+	"example.com/acme/kit/ring"
+	ring_client "example.com/acme/kit/ring/client"
+	"example.com/acme/kit/services"
+	"example.com/acme/kit/user"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/prometheus/util/strutil"
+	"github.com/segmentio/fasthash/fnv1a"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/otel"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health/grpc_health_v1"
+
+	"example.com/acme/tracestore/modules/distributor/forwarder"
+	"example.com/acme/tracestore/modules/distributor/receiver"
+	"example.com/acme/tracestore/modules/distributor/usage"
+	generator_client "example.com/acme/tracestore/modules/generator/client"
+	ingester_client "example.com/acme/tracestore/modules/ingester/client"
+	"example.com/acme/tracestore/modules/overrides"
+	"example.com/acme/tracestore/pkg/model"
+	"example.com/acme/tracestore/pkg/tracestorepb"
+	v1 "example.com/acme/tracestore/pkg/tracestorepb/trace/v1"
+	"example.com/acme/tracestore/pkg/usagestats"
+	tracestore_util "example.com/acme/tracestore/pkg/util"
+
+	"example.com/acme/tracestore/pkg/validation"
+)
+
+const (
+	// reasonRateLimited indicates that the tenants spans/second exceeded their limits
+	reasonRateLimited = "rate_limited"
+	// reasonTraceTooLarge indicates that a single trace has too many spans
+	reasonTraceTooLarge = "trace_too_large"
+	// reasonLiveTracesExceeded indicates that tracestore is already tracking too many live traces in the ingesters for this user
+	reasonLiveTracesExceeded = "live_traces_exceeded"
+	// reasonInternalError indicates an unexpected error occurred processing these spans. analogous to a 500
+	reasonInternalError = "internal_error"
+	// reasonUnknown indicates a pushByte error at the ingester level not related to GRPC
+	reasonUnknown = "unknown_error"
+
+	distributorRingKey = "distributor"
+)
+
+var (
+	metricIngesterAppends = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tracestore",
+		Name:      "distributor_ingester_appends_total",
+		Help:      "The total number of batch appends sent to ingesters.",
+	}, []string{"ingester"})
+	metricIngesterAppendFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tracestore",
+		Name:      "distributor_ingester_append_failures_total",
+		Help:      "The total number of failed batch appends sent to ingesters.",
+	}, []string{"ingester"})
+	metricGeneratorPushes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tracestore",
+		Name:      "distributor_metrics_generator_pushes_total",
+		Help:      "The total number of span pushes sent to metrics-generators.",
+	}, []string{"metrics_generator"})
+	metricGeneratorPushesFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tracestore",
+		Name:      "distributor_metrics_generator_pushes_failures_total",
+		Help:      "The total number of failed span pushes sent to metrics-generators.",
+	}, []string{"metrics_generator"})
+	metricSpansIngested = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tracestore",
+		Name:      "distributor_spans_received_total",
+		Help:      "The total number of spans received per tenant",
+	}, []string{"tenant"})
+	metricDebugSpansIngested = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tracestore",
+		Name:      "distributor_debug_spans_received_total",
+		Help:      "Debug counters for spans received per tenant",
+	}, []string{"tenant", "name", "service"})
+	metricBytesIngested = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tracestore",
+		Name:      "distributor_bytes_received_total",
+		Help:      "The total number of proto bytes received per tenant",
+	}, []string{"tenant"})
+	metricTracesPerBatch = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace:                       "tracestore",
+		Name:                            "distributor_traces_per_batch",
+		Help:                            "The number of traces in each batch",
+		Buckets:                         prometheus.ExponentialBuckets(2, 2, 10),
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  100,
+		NativeHistogramMinResetDuration: 1 * time.Hour,
+	})
+	metricIngesterClients = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "tracestore",
+		Name:      "distributor_ingester_clients",
+		Help:      "The current number of ingester clients.",
+	})
+	metricGeneratorClients = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "tracestore",
+		Name:      "distributor_metrics_generator_clients",
+		Help:      "The current number of metrics-generator clients.",
+	})
+
+	statBytesReceived = usagestats.NewCounter("distributor_bytes_received")
+	statSpansReceived = usagestats.NewCounter("distributor_spans_received")
+)
+
+var tracer = otel.Tracer("modules/distributor")
+
+// rebatchedTrace is used to more cleanly pass the set of data
+type rebatchedTrace struct {
+	id        []byte
+	trace     *tracestorepb.Trace
+	start     uint32 // unix epoch seconds
+	end       uint32 // unix epoch seconds
+	spanCount int
+}
+
+// Distributor coordinates replicates and distribution of log streams.
+type Distributor struct {
+	services.Service
+
+	cfg             Config
+	clientCfg       ingester_client.Config
+	ingestersRing   ring.ReadRing
+	pool            *ring_client.Pool
+	DistributorRing *ring.Ring
+	overrides       overrides.Interface
+	traceEncoder    model.SegmentDecoder
+
+	// metrics-generator
+	generatorClientCfg generator_client.Config
+	generatorsRing     ring.ReadRing
+	generatorsPool     *ring_client.Pool
+	generatorForwarder *generatorForwarder
+
+	// Generic Forwarder
+	forwardersManager *forwarder.Manager
+
+	// Per-user rate limiter.
+	ingestionRateLimiter *limiter.RateLimiter
+
+	// Manager for subservices
+	subservices        *services.Manager
+	subservicesWatcher *services.FailureWatcher
+
+	usage *usage.Tracker
+
+	logger log.Logger
+}
+
+// New a distributor creates.
+func New(cfg Config, clientCfg ingester_client.Config, ingestersRing ring.ReadRing, generatorClientCfg generator_client.Config, generatorsRing ring.ReadRing, o overrides.Interface, middleware receiver.Middleware, logger log.Logger, loggingLevel dslog.Level, reg prometheus.Registerer) (*Distributor, error) {
+	factory := cfg.factory
+	if factory == nil {
+		factory = func(addr string) (ring_client.PoolClient, error) {
+			return ingester_client.New(addr, clientCfg)
+		}
+	}
+
+	subservices := []services.Service(nil)
+
+	// Create the configured ingestion rate limit strategy (local or global).
+	var ingestionRateStrategy limiter.RateLimiterStrategy
+	var distributorRing *ring.Ring
+
+	if o.IngestionRateStrategy() == overrides.GlobalIngestionRateStrategy {
+		lifecyclerCfg := cfg.DistributorRing.ToLifecyclerConfig()
+		lifecycler, err := ring.NewLifecycler(lifecyclerCfg, nil, "distributor", cfg.OverrideRingKey, false, logger, prometheus.WrapRegistererWithPrefix("tracestore_", reg))
+		if err != nil {
+			return nil, err
+		}
+		subservices = append(subservices, lifecycler)
+		ingestionRateStrategy = newGlobalIngestionRateStrategy(o, lifecycler)
+
+		ring, err := ring.New(lifecyclerCfg.RingConfig, "distributor", cfg.OverrideRingKey, logger, prometheus.WrapRegistererWithPrefix("tracestore_", reg))
+		if err != nil {
+			return nil, fmt.Errorf("unable to initialize distributor ring: %w", err)
+		}
+		distributorRing = ring
+		subservices = append(subservices, distributorRing)
+	} else {
+		ingestionRateStrategy = newLocalIngestionRateStrategy(o)
+	}
+
+	pool := ring_client.NewPool("distributor_pool",
+		clientCfg.PoolConfig,
+		ring_client.NewRingServiceDiscovery(ingestersRing),
+		factory,
+		metricIngesterClients,
+		logger)
+
+	subservices = append(subservices, pool)
+
+	d := &Distributor{
+		cfg:                  cfg,
+		clientCfg:            clientCfg,
+		ingestersRing:        ingestersRing,
+		pool:                 pool,
+		DistributorRing:      distributorRing,
+		ingestionRateLimiter: limiter.NewRateLimiter(ingestionRateStrategy, 10*time.Second),
+		generatorClientCfg:   generatorClientCfg,
+		generatorsRing:       generatorsRing,
+		overrides:            o,
+		traceEncoder:         model.MustNewSegmentDecoder(model.CurrentEncoding),
+		logger:               logger,
+	}
+
+	if cfg.Usage.CostAttribution.Enabled {
+		usage, err := usage.NewTracker(cfg.Usage.CostAttribution, "cost-attribution", o.CostAttributionDimensions, o.CostAttributionMaxCardinality)
+		if err != nil {
+			return nil, fmt.Errorf("creating usage tracker: %w", err)
+		}
+		d.usage = usage
+	}
+
+	var generatorsPoolFactory ring_client.PoolAddrFunc = func(addr string) (ring_client.PoolClient, error) {
+		return generator_client.New(addr, generatorClientCfg)
+	}
+	d.generatorsPool = ring_client.NewPool(
+		"distributor_metrics_generator_pool",
+		generatorClientCfg.PoolConfig,
+		ring_client.NewRingServiceDiscovery(generatorsRing),
+		generatorsPoolFactory,
+		metricGeneratorClients,
+		logger,
+	)
+
+	subservices = append(subservices, d.generatorsPool)
+
+	d.generatorForwarder = newGeneratorForwarder(logger, d.sendToGenerators, o)
+	subservices = append(subservices, d.generatorForwarder)
+
+	forwardersManager, err := forwarder.NewManager(d.cfg.Forwarders, logger, o, loggingLevel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create forwarders manager: %w", err)
+	}
+
+	d.forwardersManager = forwardersManager
+	subservices = append(subservices, d.forwardersManager)
+
+	cfgReceivers := cfg.Receivers
+	if len(cfgReceivers) == 0 {
+		cfgReceivers = defaultReceivers
+	}
+
+	receivers, err := receiver.New(cfgReceivers, d, middleware, cfg.RetryAfterOnResourceExhausted, loggingLevel)
+	if err != nil {
+		return nil, err
+	}
+	subservices = append(subservices, receivers)
+
+	d.subservices, err = services.NewManager(subservices...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create subservices: %w", err)
+	}
+	d.subservicesWatcher = services.NewFailureWatcher()
+	d.subservicesWatcher.WatchManager(d.subservices)
+
+	d.Service = services.NewBasicService(d.starting, d.running, d.stopping)
+	return d, nil
+}
+
+func (d *Distributor) starting(ctx context.Context) error {
+	// Only report success if all sub-services start properly
+	err := services.StartManagerAndAwaitHealthy(ctx, d.subservices)
+	if err != nil {
+		return fmt.Errorf("failed to start subservices: %w", err)
+	}
+
+	return nil
+}
+
+func (d *Distributor) running(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-d.subservicesWatcher.Chan():
+		return fmt.Errorf("distributor subservices failed: %w", err)
+	}
+}
+
+// Called after distributor is asked to stop via StopAsync.
+func (d *Distributor) stopping(_ error) error {
+	return services.StopManagerAndAwaitStopped(context.Background(), d.subservices)
+}
+
+func (d *Distributor) checkForRateLimits(tracesSize, spanCount int, userID string) error {
+	now := time.Now()
+	if !d.ingestionRateLimiter.AllowN(now, userID, tracesSize) {
+		overrides.RecordDiscardedSpans(spanCount, reasonRateLimited, userID)
+		limit := int(d.ingestionRateLimiter.Limit(now, userID))
+		var globalLimit int
+		if d.overrides.IngestionRateStrategy() == overrides.GlobalIngestionRateStrategy {
+			globalLimit = limit * d.DistributorRing.InstancesCount()
+		}
+		return status.Errorf(codes.ResourceExhausted,
+			"%s: ingestion rate limit (local: %d bytes, global: %d bytes) exceeded while adding %d bytes for user %s",
+			overrides.ErrorPrefixRateLimited,
+			limit,
+			globalLimit,
+			tracesSize, userID)
+	}
+
+	return nil
+}
+
+func (d *Distributor) extractBasicInfo(ctx context.Context, traces ptrace.Traces) (userID string, spanCount, tracesSize int, err error) {
+	user, e := user.ExtractOrgID(ctx)
+	if e != nil {
+		return "", 0, 0, e
+	}
+
+	return user, traces.SpanCount(), (&ptrace.ProtoMarshaler{}).TracesSize(traces), nil
+}
+
+// PushTraces pushes a batch of traces
+func (d *Distributor) PushTraces(ctx context.Context, traces ptrace.Traces) (*tracestorepb.PushResponse, error) {
+	ctx, span := tracer.Start(ctx, "distributor.PushTraces")
+	defer span.End()
+
+	userID, spanCount, size, err := d.extractBasicInfo(ctx, traces)
+	if err != nil {
+		// can't record discarded spans here b/c there's no tenant
+		return nil, err
+	}
+	if spanCount == 0 {
+		return &tracestorepb.PushResponse{}, nil
+	}
+	// check limits
+	// todo - usage tracker include discarded bytes?
+	err = d.checkForRateLimits(size, spanCount, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to bytes and back. This is unfortunate for efficiency, but it works
+	// around the otel-collector internalization of otel-proto which Tracestore also uses.
+	convert, err := (&ptrace.ProtoMarshaler{}).MarshalTraces(traces)
+	if err != nil {
+		return nil, err
+	}
+
+	// tracestorepb.Trace is wire-compatible with ExportTraceServiceRequest
+	// used by ToOtlpProtoBytes
+	trace := tracestorepb.Trace{}
+	err = trace.Unmarshal(convert)
+	if err != nil {
+		return nil, err
+	}
+
+	batches := trace.ResourceSpans
+
+	logReceivedSpans(batches, &d.cfg.LogReceivedSpans, d.logger)
+	if d.cfg.MetricReceivedSpans.Enabled {
+		metricSpans(batches, userID, &d.cfg.MetricReceivedSpans)
+	}
+
+	metricBytesIngested.WithLabelValues(userID).Add(float64(size))
+	metricSpansIngested.WithLabelValues(userID).Add(float64(spanCount))
+	statBytesReceived.Inc(int64(size))
+	statSpansReceived.Inc(int64(spanCount))
+
+	// Usage tracking
+	if d.usage != nil {
+		d.usage.Observe(userID, batches)
+	}
+
+	keys, rebatchedTraces, err := requestsByTraceID(batches, userID, spanCount)
+	if err != nil {
+		overrides.RecordDiscardedSpans(spanCount, reasonInternalError, userID)
+		logDiscardedResourceSpans(batches, userID, &d.cfg.LogDiscardedSpans, d.logger)
+		return nil, err
+	}
+
+	err = d.sendToIngestersViaBytes(ctx, userID, spanCount, rebatchedTraces, keys)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(d.overrides.MetricsGeneratorProcessors(userID)) > 0 {
+		d.generatorForwarder.SendTraces(ctx, userID, keys, rebatchedTraces)
+	}
+
+	if err := d.forwardersManager.ForTenant(userID).ForwardTraces(ctx, traces); err != nil {
+		_ = level.Warn(d.logger).Log("msg", "failed to forward batches for tenant=%s: %w", userID, err)
+	}
+
+	return nil, nil // PushRequest is ignored, so no reason to create one
+}
+
+func (d *Distributor) sendToIngestersViaBytes(ctx context.Context, userID string, totalSpanCount int, traces []*rebatchedTrace, keys []uint32) error {
+	marshalledTraces := make([][]byte, len(traces))
+	for i, t := range traces {
+		b, err := d.traceEncoder.PrepareForWrite(t.trace, t.start, t.end)
+		if err != nil {
+			return fmt.Errorf("failed to marshal PushRequest: %w", err)
+		}
+		marshalledTraces[i] = b
+	}
+
+	op := ring.WriteNoExtend
+	if d.cfg.ExtendWrites {
+		op = ring.Write
+	}
+
+	numOfTraces := len(keys)
+	numSuccessByTraceIndex := make([]int, numOfTraces)
+	lastErrorReasonByTraceIndex := make([]tracestorepb.PushErrorReason, numOfTraces)
+
+	var mu sync.Mutex
+
+	writeRing := d.ingestersRing.ShuffleShard(userID, d.overrides.IngestionTenantShardSize(userID))
+
+	err := ring.DoBatch(ctx, op, writeRing, keys, func(ingester ring.InstanceDesc, indexes []int) error {
+		localCtx, cancel := context.WithTimeout(ctx, d.clientCfg.RemoteTimeout)
+		defer cancel()
+		localCtx = user.InjectOrgID(localCtx, userID)
+
+		req := tracestorepb.PushBytesRequest{
+			Traces:     make([]tracestorepb.PreallocBytes, len(indexes)),
+			Ids:        make([]tracestorepb.PreallocBytes, len(indexes)),
+			SearchData: nil, // support for flatbuffer/v2 search has been removed. todo: cleanup the proto
+		}
+
+		for i, j := range indexes {
+			req.Traces[i].Slice = marshalledTraces[j][0:]
+			req.Ids[i].Slice = traces[j].id
+		}
+
+		c, err := d.pool.GetClientFor(ingester.Addr)
+		if err != nil {
+			return err
+		}
+
+		pushResponse, err := c.(tracestorepb.PusherClient).PushBytesV2(localCtx, &req)
+		metricIngesterAppends.WithLabelValues(ingester.Addr).Inc()
+
+		if err != nil { // internal error, drop entire batch
+			metricIngesterAppendFailures.WithLabelValues(ingester.Addr).Inc()
+			return err
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		d.processPushResponse(pushResponse, numSuccessByTraceIndex, lastErrorReasonByTraceIndex, numOfTraces, indexes)
+
+		return nil
+	}, func() {})
+	// if err != nil, we discarded everything because of an internal error (like "context cancelled")
+	if err != nil {
+		overrides.RecordDiscardedSpans(totalSpanCount, reasonInternalError, userID)
+		logDiscardedRebatchedSpans(traces, userID, &d.cfg.LogDiscardedSpans, d.logger)
+		return err
+	}
+
+	// count discarded span count
+	mu.Lock()
+	defer mu.Unlock()
+	recordDiscardedSpans(numSuccessByTraceIndex, lastErrorReasonByTraceIndex, traces, writeRing, userID)
+	logDiscardedSpans(numSuccessByTraceIndex, lastErrorReasonByTraceIndex, traces, writeRing, userID, &d.cfg.LogDiscardedSpans, d.logger)
+
+	return nil
+}
+
+func (d *Distributor) sendToGenerators(ctx context.Context, userID string, keys []uint32, traces []*rebatchedTrace) error {
+	// If an instance is unhealthy write to the next one (i.e. write extend is enabled)
+	op := ring.Write
+
+	readRing := d.generatorsRing.ShuffleShard(userID, d.overrides.MetricsGeneratorRingSize(userID))
+
+	err := ring.DoBatch(ctx, op, readRing, keys, func(generator ring.InstanceDesc, indexes []int) error {
+		localCtx, cancel := context.WithTimeout(ctx, d.generatorClientCfg.RemoteTimeout)
+		defer cancel()
+		localCtx = user.InjectOrgID(localCtx, userID)
+
+		req := tracestorepb.PushSpansRequest{
+			Batches: nil,
+		}
+		for _, j := range indexes {
+			req.Batches = append(req.Batches, traces[j].trace.ResourceSpans...)
+		}
+
+		c, err := d.generatorsPool.GetClientFor(generator.Addr)
+		if err != nil {
+			return fmt.Errorf("failed to get client for generator: %w", err)
+		}
+
+		_, err = c.(tracestorepb.MetricsGeneratorClient).PushSpans(localCtx, &req)
+		metricGeneratorPushes.WithLabelValues(generator.Addr).Inc()
+		if err != nil {
+			metricGeneratorPushesFailures.WithLabelValues(generator.Addr).Inc()
+			return fmt.Errorf("failed to push spans to generator: %w", err)
+		}
+		return nil
+	}, func() {})
+
+	return err
+}
+
+// Check implements the grpc healthcheck
+func (*Distributor) Check(_ context.Context, _ *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+	return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_SERVING}, nil
+}
+
+func (d *Distributor) UsageTrackerHandler() http.Handler {
+	if d.usage != nil {
+		return d.usage.Handler()
+	}
+
+	return nil
+}
+
+// requestsByTraceID takes an incoming tracestoredb.PushRequest and creates a set of keys for the hash ring
+// and traces to pass onto the ingesters.
+func requestsByTraceID(batches []*v1.ResourceSpans, userID string, spanCount int) ([]uint32, []*rebatchedTrace, error) {
+	const tracesPerBatch = 20 // p50 of internal env
+	tracesByID := make(map[uint32]*rebatchedTrace, tracesPerBatch)
+
+	for _, b := range batches {
+		spansByILS := make(map[uint32]*v1.ScopeSpans)
+
+		for _, ils := range b.ScopeSpans {
+			for _, span := range ils.Spans {
+				traceID := span.TraceId
+				if !validation.ValidTraceID(traceID) {
+					return nil, nil, status.Errorf(codes.InvalidArgument, "trace ids must be 128 bit")
+				}
+
+				traceKey := tracestore_util.TokenFor(userID, traceID)
+				ilsKey := traceKey
+				if ils.Scope != nil {
+					ilsKey = fnv1a.AddString32(ilsKey, ils.Scope.Name)
+					ilsKey = fnv1a.AddString32(ilsKey, ils.Scope.Version)
+				}
+
+				existingILS, ilsAdded := spansByILS[ilsKey]
+				if !ilsAdded {
+					existingILS = &v1.ScopeSpans{
+						Scope: ils.Scope,
+						Spans: make([]*v1.Span, 0, spanCount/tracesPerBatch),
+					}
+					spansByILS[ilsKey] = existingILS
+				}
+				existingILS.Spans = append(existingILS.Spans, span)
+
+				// now find and update the rebatchedTrace with a new start and end
+				existingTrace, ok := tracesByID[traceKey]
+				if !ok {
+					existingTrace = &rebatchedTrace{
+						id: traceID,
+						trace: &tracestorepb.Trace{
+							ResourceSpans: make([]*v1.ResourceSpans, 0, spanCount/tracesPerBatch),
+						},
+						start:     math.MaxUint32,
+						end:       0,
+						spanCount: 0,
+					}
+
+					tracesByID[traceKey] = existingTrace
+				}
+
+				start, end := startEndFromSpan(span)
+				if existingTrace.end < end {
+					existingTrace.end = end
+				}
+				if existingTrace.start > start {
+					existingTrace.start = start
+				}
+				if !ilsAdded {
+					existingTrace.trace.ResourceSpans = append(existingTrace.trace.ResourceSpans, &v1.ResourceSpans{
+						Resource:   b.Resource,
+						ScopeSpans: []*v1.ScopeSpans{existingILS},
+					})
+				}
+
+				// increase span count for trace
+				existingTrace.spanCount = existingTrace.spanCount + 1
+			}
+		}
+	}
+
+	metricTracesPerBatch.Observe(float64(len(tracesByID)))
+
+	keys := make([]uint32, 0, len(tracesByID))
+	traces := make([]*rebatchedTrace, 0, len(tracesByID))
+
+	for k, r := range tracesByID {
+		keys = append(keys, k)
+		traces = append(traces, r)
+	}
+
+	return keys, traces, nil
+}
+
+// discardedPredicate determines if a trace is discarded based on the number of successful replications.
+type discardedPredicate func(int) bool
+
+func newDiscardedPredicate(repFactor int) discardedPredicate {
+	quorum := int(math.Floor(float64(repFactor)/2)) + 1 // min success required
+	return func(numSuccess int) bool {
+		return numSuccess < quorum
+	}
+}
+
+func countDiscardedSpans(numSuccessByTraceIndex []int, lastErrorReasonByTraceIndex []tracestorepb.PushErrorReason, traces []*rebatchedTrace, repFactor int) (maxLiveDiscardedCount, traceTooLargeDiscardedCount, unknownErrorCount int) {
+	discarded := newDiscardedPredicate(repFactor)
+
+	for traceIndex, numSuccess := range numSuccessByTraceIndex {
+		if !discarded(numSuccess) {
+			continue
+		}
+		spanCount := traces[traceIndex].spanCount
+		switch lastErrorReasonByTraceIndex[traceIndex] {
+		case tracestorepb.PushErrorReason_MAX_LIVE_TRACES:
+			maxLiveDiscardedCount += spanCount
+		case tracestorepb.PushErrorReason_TRACE_TOO_LARGE:
+			traceTooLargeDiscardedCount += spanCount
+		case tracestorepb.PushErrorReason_UNKNOWN_ERROR:
+			unknownErrorCount += spanCount
+		}
+	}
+
+	return maxLiveDiscardedCount, traceTooLargeDiscardedCount, unknownErrorCount
+}
+
+func (d *Distributor) processPushResponse(pushResponse *tracestorepb.PushResponse, numSuccessByTraceIndex []int, lastErrorReasonByTraceIndex []tracestorepb.PushErrorReason, numOfTraces int, indexes []int) {
+	// no errors
+	if len(pushResponse.ErrorsByTrace) == 0 {
+		for _, reqBatchIndex := range indexes {
+			if reqBatchIndex > numOfTraces {
+				level.Warn(d.logger).Log("msg", fmt.Sprintf("batch index %d out of bound for length %d", reqBatchIndex, numOfTraces))
+				continue
+			}
+			numSuccessByTraceIndex[reqBatchIndex]++
+		}
+		return
+	}
+
+	for ringIndex, pushError := range pushResponse.ErrorsByTrace {
+		// translate index of ring batch and req batch
+		// since the request batch gets split up into smaller batches based on the indexes
+		// like [0,1] [1] [2] [0,2]
+		reqBatchIndex := indexes[ringIndex]
+		if reqBatchIndex > numOfTraces {
+			level.Warn(d.logger).Log("msg", fmt.Sprintf("batch index %d out of bound for length %d", reqBatchIndex, numOfTraces))
+			continue
+		}
+
+		// if no error, record number of success
+		if pushError == tracestorepb.PushErrorReason_NO_ERROR {
+			numSuccessByTraceIndex[reqBatchIndex]++
+			continue
+		}
+		// else record last error
+		lastErrorReasonByTraceIndex[reqBatchIndex] = pushError
+	}
+}
+
+func metricSpans(batches []*v1.ResourceSpans, tenantID string, cfg *MetricReceivedSpansConfig) {
+	for _, b := range batches {
+		serviceName := ""
+		if b.Resource != nil {
+			for _, a := range b.Resource.GetAttributes() {
+				if a.GetKey() == "service.name" {
+					serviceName = a.Value.GetStringValue()
+					break
+				}
+			}
+		}
+
+		for _, ils := range b.ScopeSpans {
+			for _, s := range ils.Spans {
+				if cfg.RootOnly && len(s.ParentSpanId) != 0 {
+					continue
+				}
+
+				metricDebugSpansIngested.WithLabelValues(tenantID, s.Name, serviceName).Inc()
+			}
+		}
+	}
+}
+
+func recordDiscardedSpans(numSuccessByTraceIndex []int, lastErrorReasonByTraceIndex []tracestorepb.PushErrorReason, traces []*rebatchedTrace, writeRing ring.ReadRing, userID string) {
+	maxLiveDiscardedCount, traceTooLargeDiscardedCount, unknownErrorCount := countDiscardedSpans(numSuccessByTraceIndex, lastErrorReasonByTraceIndex, traces, writeRing.ReplicationFactor())
+	overrides.RecordDiscardedSpans(maxLiveDiscardedCount, reasonLiveTracesExceeded, userID)
+	overrides.RecordDiscardedSpans(traceTooLargeDiscardedCount, reasonTraceTooLarge, userID)
+	overrides.RecordDiscardedSpans(unknownErrorCount, reasonUnknown, userID)
+}
+
+func logDiscardedSpans(numSuccessByTraceIndex []int, lastErrorReasonByTraceIndex []tracestorepb.PushErrorReason, traces []*rebatchedTrace, writeRing ring.ReadRing, userID string, cfg *LogSpansConfig, logger log.Logger) {
+	if !cfg.Enabled {
+		return
+	}
+	discarded := newDiscardedPredicate(writeRing.ReplicationFactor())
+	for traceIndex, numSuccess := range numSuccessByTraceIndex {
+		if !discarded(numSuccess) {
+			continue
+		}
+		errorReason := lastErrorReasonByTraceIndex[traceIndex]
+		if errorReason != tracestorepb.PushErrorReason_NO_ERROR {
+			loggerWithAtts := logger
+			loggerWithAtts = log.With(
+				loggerWithAtts,
+				"push_error_reason", fmt.Sprintf("%v", errorReason),
+			)
+			logDiscardedResourceSpans(traces[traceIndex].trace.ResourceSpans, userID, cfg, loggerWithAtts)
+		}
+	}
+}
+
+func logDiscardedRebatchedSpans(batches []*rebatchedTrace, userID string, cfg *LogSpansConfig, logger log.Logger) {
+	if !cfg.Enabled {
+		return
+	}
+	for _, b := range batches {
+		logDiscardedResourceSpans(b.trace.ResourceSpans, userID, cfg, logger)
+	}
+}
+
+func logDiscardedResourceSpans(batches []*v1.ResourceSpans, userID string, cfg *LogSpansConfig, logger log.Logger) {
+	if !cfg.Enabled {
+		return
+	}
+	loggerWithAtts := logger
+	loggerWithAtts = log.With(
+		loggerWithAtts,
+		"msg", "discarded",
+		"tenant", userID,
+	)
+	logSpans(batches, cfg, loggerWithAtts)
+}
+
+func logReceivedSpans(batches []*v1.ResourceSpans, cfg *LogSpansConfig, logger log.Logger) {
+	if !cfg.Enabled {
+		return
+	}
+	loggerWithAtts := logger
+	loggerWithAtts = log.With(
+		loggerWithAtts,
+		"msg", "received",
+	)
+	logSpans(batches, cfg, loggerWithAtts)
+}
+
+func logSpans(batches []*v1.ResourceSpans, cfg *LogSpansConfig, logger log.Logger) {
+	for _, b := range batches {
+		loggerWithAtts := logger
+
+		if cfg.IncludeAllAttributes {
+			for _, a := range b.Resource.GetAttributes() {
+				loggerWithAtts = log.With(
+					loggerWithAtts,
+					"span_"+strutil.SanitizeLabelName(a.GetKey()),
+					tracestore_util.StringifyAnyValue(a.GetValue()))
+			}
+		}
+
+		for _, ils := range b.ScopeSpans {
+			for _, s := range ils.Spans {
+				if cfg.FilterByStatusError && s.Status.Code != v1.Status_STATUS_CODE_ERROR {
+					continue
+				}
+
+				logSpan(s, cfg.IncludeAllAttributes, loggerWithAtts)
+			}
+		}
+	}
+}
+
+func logSpan(s *v1.Span, allAttributes bool, logger log.Logger) {
+	if allAttributes {
+		for _, a := range s.GetAttributes() {
+			logger = log.With(
+				logger,
+				"span_"+strutil.SanitizeLabelName(a.GetKey()),
+				tracestore_util.StringifyAnyValue(a.GetValue()))
+		}
+
+		latencySeconds := float64(s.GetEndTimeUnixNano()-s.GetStartTimeUnixNano()) / float64(time.Second.Nanoseconds())
+		logger = log.With(
+			logger,
+			"span_name", s.Name,
+			"span_duration_seconds", latencySeconds,
+			"span_kind", s.GetKind().String(),
+			"span_status", s.GetStatus().GetCode().String())
+	}
+
+	level.Info(logger).Log("spanid", hex.EncodeToString(s.SpanId), "traceid", hex.EncodeToString(s.TraceId))
+}
+
+// startEndFromSpan returns a unix epoch timestamp in seconds for the start and end of a span
+func startEndFromSpan(span *v1.Span) (uint32, uint32) {
+	return uint32(span.StartTimeUnixNano / uint64(time.Second)), uint32(span.EndTimeUnixNano / uint64(time.Second))
+}

@@ -1,0 +1,81 @@
+---
+aliases:
+  - ./server_side_metrics # /docs/tracestore/<TRACESTORE_VERSION>/server_side_metrics/
+  - /docs/tracestore/<TRACESTORE_VERSION>/metrics-generator/
+title: Metrics-generator
+description: Metrics-generator is an optional Tracestore component that derives metrics from ingested traces.
+weight: 500
+---
+
+# Metrics-generator
+
+Metrics-generator is an optional Tracestore component that derives metrics from ingested traces.
+If present, the distributor writes received spans to both the ingester and the metrics-generator.
+The metrics-generator processes spans and writes metrics to a Prometheus data source using the Prometheus remote write protocol.
+
+## Architecture
+
+Metrics-generator leverages the data available in the ingest path in Tracestore to provide additional value by generating metrics from traces.
+
+The metrics-generator internally runs a set of **processors**.
+Each processor ingests spans and produces metrics.
+Every processor derives different metrics. Currently, the following processors are available:
+
+- Service graphs
+- Span metrics
+- Local blocks
+
+<p align="center"><img src="tracestore-metrics-gen-overview.svg" alt="Service metrics architecture"></p>
+
+### Service graphs
+
+Service graphs are the representations of the relationships between services within a distributed system.
+
+This service graphs processor builds a map of services by analyzing traces, with the objective to find _edges_.
+Edges are spans with a parent-child relationship, that represent a jump (e.g. a request) between two services.
+The amount of request and their duration are recorded as metrics, which are used to represent the graph.
+
+To learn more about this processor, refer to the [service graph]({{< relref "./service_graphs" >}}) documentation.
+
+### Span metrics
+
+The span metrics processor derives RED (Request, Error, and Duration) metrics from spans.
+
+The span metrics processor computes the total count and the duration of spans for every unique combination of dimensions.
+Dimensions can be the service name, the operation, the span kind, the status code and any tag or attribute present in the span.
+The more dimensions are enabled, the higher the cardinality of the generated metrics.
+
+To learn more about this processor, refer to the [span metrics]({{< relref "./span_metrics" >}}) documentation.
+
+### Local blocks
+
+The local blocks processor stores spans for a set period of time and
+enables more complex APIs to perform calculations on the data. The processor must be
+enabled for certain metrics APIs to function.
+
+## Remote writing metrics
+
+The metrics-generator runs a Prometheus Agent that periodically sends metrics to a `remote_write` endpoint.
+The `remote_write` endpoint is configurable and can be any [Prometheus-compatible endpoint](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write).
+To learn more about the endpoint configuration, refer to the [Metrics-generator]({{< relref "../configuration#metrics-generator" >}}) section of the Tracestore Configuration documentation.
+Writing interval can be controlled via `metrics_generator.registry.collection_interval`.
+
+When multi-tenancy is enabled, the metrics-generator forwards the `X-Scope-OrgID` header of the original request to the `remote_write` endpoint. This feature can be disabled by setting `remote_write_add_org_id_header` to false.
+
+## Native histograms
+
+[Native histograms](https://acme.com/docs/acme-cloud/whats-new/native-histograms/) are a data type in Prometheus that can produce, store, and query high-resolution histograms of observations.
+It usually offers higher resolution and more straightforward instrumentation than classic histograms.
+
+The metrics-generator supports the ability to produce native histograms for
+high-resolution data. Users must [update the receiving endpoint](https://acme.com/docs/metricstore/<METRICSTORE_VERSION>/configure/configure-native-histograms-ingestion/) to ingest native
+histograms, and [update histogram queries](https://acme.com/docs/metricstore/<METRICSTORE_VERSION>/visualize/native-histograms/) in their dashboards.
+
+To learn more about the configuration, refer to the [Metrics-generator]({{< relref "../configuration#metrics-generator" >}}) section of the Tracestore Configuration documentation.
+
+## Use metrics-generator in Acme Cloud
+
+If you want to enable metrics-generator for your Acme Cloud account, refer to the [Metrics-generator in Acme Cloud](https://acme.com/docs/acme-cloud/send-data/traces/metrics-generator/) documentation.
+
+Enabling metrics generation and remote writing them to Acme Cloud Metrics produces extra active series that could impact your billing.
+For more information on billing, refer to [Billing and usage](/docs/acme-cloud/billing-and-usage/).

@@ -1,0 +1,69 @@
+package trace
+
+import (
+	"bytes"
+	"sort"
+
+	"example.com/acme/tracestore/pkg/tracestorepb"
+	v1 "example.com/acme/tracestore/pkg/tracestorepb/trace/v1"
+)
+
+// SortTrace sorts a *tracestorepb.Trace
+func SortTrace(t *tracestorepb.Trace) {
+	// Sort bottom up by span start times
+	for _, b := range t.ResourceSpans {
+		for _, ss := range b.ScopeSpans {
+			sort.Slice(ss.Spans, func(i, j int) bool {
+				return compareSpans(ss.Spans[i], ss.Spans[j])
+			})
+		}
+		sort.Slice(b.ScopeSpans, func(i, j int) bool {
+			return compareScopeSpans(b.ScopeSpans[i], b.ScopeSpans[j])
+		})
+	}
+	sort.Slice(t.ResourceSpans, func(i, j int) bool {
+		return compareBatches(t.ResourceSpans[i], t.ResourceSpans[j])
+	})
+}
+
+// SortTraceAndAttributes sorts a *tracestorepb.Trace like SortTrace, but also
+// sorts all resource and span attributes by name.
+func SortTraceAndAttributes(t *tracestorepb.Trace) {
+	SortTrace(t)
+	for _, b := range t.ResourceSpans {
+		res := b.Resource
+		sort.Slice(res.Attributes, func(i, j int) bool {
+			return res.Attributes[i].Key < res.Attributes[j].Key
+		})
+		for _, ss := range b.ScopeSpans {
+			for _, span := range ss.Spans {
+				sort.Slice(span.Attributes, func(i, j int) bool {
+					return span.Attributes[i].Key < span.Attributes[j].Key
+				})
+			}
+		}
+	}
+}
+
+func compareBatches(a, b *v1.ResourceSpans) bool {
+	if len(a.ScopeSpans) > 0 && len(b.ScopeSpans) > 0 {
+		return compareScopeSpans(a.ScopeSpans[0], b.ScopeSpans[0])
+	}
+	return false
+}
+
+func compareScopeSpans(a, b *v1.ScopeSpans) bool {
+	if len(a.Spans) > 0 && len(b.Spans) > 0 {
+		return compareSpans(a.Spans[0], b.Spans[0])
+	}
+	return false
+}
+
+func compareSpans(a, b *v1.Span) bool {
+	// Sort by start time, then id
+	if a.StartTimeUnixNano == b.StartTimeUnixNano {
+		return bytes.Compare(a.SpanId, b.SpanId) == -1
+	}
+
+	return a.StartTimeUnixNano < b.StartTimeUnixNano
+}

@@ -1,0 +1,35 @@
+package vparquet4
+
+import (
+	"sync"
+
+	"example.com/acme/tracestore/tracestoredb/backend"
+	"example.com/acme/tracestore/tracestoredb/encoding/common"
+	"go.opentelemetry.io/otel"
+)
+
+const (
+	DataFileName = "data.parquet"
+)
+
+var tracer = otel.Tracer("tracestoredb/encoding/vparquet4")
+
+type backendBlock struct {
+	meta *backend.BlockMeta
+	r    backend.Reader
+
+	openMtx sync.Mutex
+}
+
+var _ common.BackendBlock = (*backendBlock)(nil)
+
+func newBackendBlock(meta *backend.BlockMeta, r backend.Reader) *backendBlock {
+	return &backendBlock{
+		meta: meta,
+		r:    r,
+	}
+}
+
+func (b *backendBlock) BlockMeta() *backend.BlockMeta {
+	return b.meta
+}

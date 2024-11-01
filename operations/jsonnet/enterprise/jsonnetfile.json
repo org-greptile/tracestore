@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "dependencies": [
+    {
+      "source": {
+        "git": {
+          "remote": "https://example.com/acme/tracestore.git",
+          "subdir": "operations/jsonnet/microservices"
+        }
+      },
+      "version": "main"
+    }
+  ],
+  "legacyImports": true
+}
+

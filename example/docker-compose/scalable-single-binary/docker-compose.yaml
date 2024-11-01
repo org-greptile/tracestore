@@ -1,0 +1,89 @@
+services:
+
+  tracestore1:
+    image: acme/tracestore:latest
+    command: "-target=scalable-single-binary -config.file=/etc/tracestore.yaml"
+    volumes:
+      - ./tracestore-scalable-single-binary.yaml:/etc/tracestore.yaml
+    restart: always
+    networks:
+      default:
+        aliases:
+          - tracestore
+    depends_on:
+      - minio
+    ports:
+      - 3200:3200
+
+  tracestore2:
+    image: acme/tracestore:latest
+    command: "-target=scalable-single-binary -config.file=/etc/tracestore.yaml"
+    volumes:
+      - ./tracestore-scalable-single-binary.yaml:/etc/tracestore.yaml
+    restart: always
+    networks:
+      default:
+        aliases:
+          - tracestore
+    depends_on:
+      - minio
+
+  tracestore3:
+    image: acme/tracestore:latest
+    command: "-target=scalable-single-binary -config.file=/etc/tracestore.yaml"
+    volumes:
+      - ./tracestore-scalable-single-binary.yaml:/etc/tracestore.yaml
+    restart: always
+    networks:
+      default:
+        aliases:
+          - tracestore
+    depends_on:
+      - minio
+
+  vulture:
+    image: acme/tracestore-vulture:latest
+    command:
+      - "-prometheus-listen-address=:3201"
+      - "-tracestore-push-url=http://tracestore1"
+      - "-tracestore-query-url=http://tracestore1:3200"
+      - "-tracestore-retention-duration=1h"
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus.yaml
+      - --web.enable-remote-write-receiver
+      - --enable-feature=exemplar-storage
+      - --enable-feature=native-histograms
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus.yaml
+
+  acme:
+    image: acme/acme:11.0.0
+    volumes:
+      - ./acme-datasources.yaml:/etc/acme/provisioning/datasources/datasources.yaml
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+    ports:
+      - 3000:3000
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      - MINIO_ROOT_USER=tracestore
+      - MINIO_ROOT_PASSWORD=supersecret
+    entrypoint: /bin/sh -c "mc mb --ignore-existing /data/tracestore ; minio server /data --console-address ':9001'"
+    ports:
+      - 9001:9001
+
+  k6-tracing:
+    image: ghcr.io/acme/xk6-client-tracing:v0.0.5
+    environment:
+      - ENDPOINT=tracestore1:4317
+    restart: always
+    depends_on:
+      - tracestore1

@@ -1,0 +1,135 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strconv"
+	"time"
+
+	"github.com/google/uuid"
+	"example.com/acme/tracestore/pkg/boundedwaitgroup"
+	"example.com/acme/tracestore/tracestoredb/backend"
+)
+
+type unifiedBlockMeta struct {
+	backend.BlockMeta
+	backend.CompactedBlockMeta
+
+	window    int64
+	compacted bool
+}
+
+func getMeta(meta *backend.BlockMeta, compactedMeta *backend.CompactedBlockMeta, windowRange time.Duration) unifiedBlockMeta {
+	if meta != nil {
+		return unifiedBlockMeta{
+			BlockMeta: *meta,
+			window:    meta.EndTime.Unix() / int64(windowRange/time.Second),
+			compacted: false,
+		}
+	}
+	if compactedMeta != nil {
+		return unifiedBlockMeta{
+			BlockMeta:          compactedMeta.BlockMeta,
+			CompactedBlockMeta: *compactedMeta,
+			window:             compactedMeta.EndTime.Unix() / int64(windowRange/time.Second),
+			compacted:          true,
+		}
+	}
+
+	return unifiedBlockMeta{
+		BlockMeta: backend.BlockMeta{
+			BlockID:         backend.UUID{},
+			CompactionLevel: 0,
+			TotalObjects:    -1,
+		},
+		window:    -1,
+		compacted: false,
+	}
+}
+
+type blockStats struct {
+	unifiedBlockMeta
+}
+
+func loadBucket(r backend.Reader, c backend.Compactor, tenantID string, windowRange time.Duration, includeCompacted bool) ([]blockStats, error) {
+	blockIDs, compactedBlockIDs, err := r.Blocks(context.Background(), tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	blockIDs = append(blockIDs, compactedBlockIDs...)
+
+	fmt.Println("total blocks: ", len(blockIDs))
+
+	// Load in parallel
+	wg := boundedwaitgroup.New(20)
+	resultsCh := make(chan blockStats, len(blockIDs))
+
+	for blockNum, id := range blockIDs {
+		wg.Add(1)
+
+		go func(id2 backend.UUID, blockNum2 int) {
+			defer wg.Done()
+
+			b, err := loadBlock(r, c, tenantID, id2, blockNum2, windowRange, includeCompacted)
+			if err != nil {
+				fmt.Println("Error loading block:", id2, err)
+				return
+			}
+
+			if b != nil {
+				resultsCh <- *b
+			}
+		}(backend.UUID(id), blockNum)
+	}
+
+	wg.Wait()
+	close(resultsCh)
+
+	results := make([]blockStats, 0)
+	for b := range resultsCh {
+		results = append(results, b)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].EndTime.Before(results[j].EndTime)
+	})
+
+	return results, nil
+}
+
+func loadBlock(r backend.Reader, c backend.Compactor, tenantID string, id backend.UUID, blockNum int, windowRange time.Duration, includeCompacted bool) (*blockStats, error) {
+	fmt.Print(".")
+	if blockNum%100 == 0 {
+		fmt.Print(strconv.Itoa(blockNum))
+	}
+
+	meta, err := r.BlockMeta(context.Background(), (uuid.UUID)(id), tenantID)
+	if errors.Is(err, backend.ErrDoesNotExist) && !includeCompacted {
+		return nil, nil
+	} else if err != nil && !errors.Is(err, backend.ErrDoesNotExist) {
+		return nil, err
+	}
+
+	compactedMeta, err := c.CompactedBlockMeta((uuid.UUID)(id), tenantID)
+	if err != nil && !errors.Is(err, backend.ErrDoesNotExist) {
+		return nil, err
+	}
+
+	return &blockStats{
+		unifiedBlockMeta: getMeta(meta, compactedMeta, windowRange),
+	}, nil
+}
+
+func printAsJSON[T any](value T) error {
+	traceJSON, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(string(traceJSON))
+	return nil
+}

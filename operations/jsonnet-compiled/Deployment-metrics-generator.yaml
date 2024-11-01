@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-generator
+  namespace: tracing
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: metrics-generator
+      name: metrics-generator
+      tracestore-gossip-member: "true"
+  strategy:
+    rollingUpdate:
+      maxSurge: 3
+      maxUnavailable: 1
+  template:
+    metadata:
+      annotations:
+        config_hash: 1c46db8f00d0094a1d213fb87e3fd4ba
+      labels:
+        app: metrics-generator
+        name: metrics-generator
+        tracestore-gossip-member: "true"
+    spec:
+      containers:
+      - args:
+        - -config.file=/conf/tracestore.yaml
+        - -mem-ballast-size-mbs=1024
+        - -target=metrics-generator
+        image: acme/tracestore:latest
+        name: metrics-generator
+        ports:
+        - containerPort: 3200
+          name: prom-metrics
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3200
+          initialDelaySeconds: 15
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: "1"
+            ephemeral-storage: 11Gi
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            ephemeral-storage: 10Gi
+            memory: 1Gi
+        volumeMounts:
+        - mountPath: /conf
+          name: tracestore-conf
+        - mountPath: /var/tracestore
+          name: metrics-generator-data
+        - mountPath: /overrides
+          name: overrides
+      volumes:
+      - configMap:
+          name: tracestore-metrics-generator
+        name: tracestore-conf
+      - configMap:
+          name: tracestore-overrides
+        name: overrides
+      - emptyDir: {}
+        name: metrics-generator-data

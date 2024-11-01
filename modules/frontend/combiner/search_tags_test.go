@@ -1,0 +1,303 @@
+package combiner
+
+import (
+	"sort"
+	"testing"
+
+	"github.com/gogo/protobuf/proto"
+	"example.com/acme/tracestore/pkg/tracestorepb"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestTagsCombiner(t *testing.T) {
+	tests := []struct {
+		name               string
+		factory            func(int) Combiner
+		limit              int
+		result1            proto.Message
+		result2            proto.Message
+		expectedResult     proto.Message
+		expectedShouldQuit bool
+
+		actualResult proto.Message       // provides a way for the test runner to unmarshal the response
+		sort         func(proto.Message) // the results are based on non-deterministic map iteration, provides a way for the runner to sort the results for comparison
+	}{
+		{
+			name:           "SearchTags",
+			factory:        NewSearchTags,
+			result1:        &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1"}},
+			result2:        &tracestorepb.SearchTagsResponse{TagNames: []string{"tag2", "tag3"}},
+			expectedResult: &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1", "tag2", "tag3"}, Metrics: &tracestorepb.MetadataMetrics{}},
+			actualResult:   &tracestorepb.SearchTagsResponse{},
+			sort:           func(m proto.Message) { sort.Strings(m.(*tracestorepb.SearchTagsResponse).TagNames) },
+			limit:          100,
+		},
+		{
+			name:           "SearchTagsV2",
+			factory:        NewSearchTagsV2,
+			result1:        &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"v1"}}}},
+			result2:        &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"v2", "v1"}}}},
+			expectedResult: &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"v1", "v2"}}}, Metrics: &tracestorepb.MetadataMetrics{}},
+			actualResult:   &tracestorepb.SearchTagsV2Response{},
+			sort: func(m proto.Message) {
+				scopes := m.(*tracestorepb.SearchTagsV2Response).Scopes
+				for _, scope := range scopes {
+					sort.Strings(scope.Tags)
+				}
+				sort.Slice(scopes, func(i, j int) bool {
+					return scopes[i].Name < scopes[j].Name
+				})
+			},
+			limit: 100,
+		},
+		{
+			name:           "SearchTagValues",
+			factory:        NewSearchTagValues,
+			result1:        &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1"}},
+			result2:        &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag2", "tag3"}},
+			expectedResult: &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1", "tag2", "tag3"}, Metrics: &tracestorepb.MetadataMetrics{}},
+			actualResult:   &tracestorepb.SearchTagValuesResponse{},
+			sort:           func(m proto.Message) { sort.Strings(m.(*tracestorepb.SearchTagValuesResponse).TagValues) },
+			limit:          100,
+		},
+		{
+			name:           "SearchTagValuesV2",
+			factory:        NewSearchTagValuesV2,
+			result1:        &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}}},
+			result2:        &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v2", Type: "string"}, {Value: "v3", Type: "string"}}},
+			expectedResult: &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}, {Value: "v2", Type: "string"}, {Value: "v3", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{}},
+			actualResult:   &tracestorepb.SearchTagValuesV2Response{},
+			sort: func(m proto.Message) {
+				sort.Slice(m.(*tracestorepb.SearchTagValuesV2Response).TagValues, func(i, j int) bool {
+					return m.(*tracestorepb.SearchTagValuesV2Response).TagValues[i].Value < m.(*tracestorepb.SearchTagValuesV2Response).TagValues[j].Value
+				})
+			},
+			limit: 100,
+		},
+		// limits
+		{
+			name:               "SearchTags - limited",
+			factory:            NewSearchTags,
+			result1:            &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1"}},
+			result2:            &tracestorepb.SearchTagsResponse{TagNames: []string{"tag2", "tag3"}},
+			expectedResult:     &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1"}, Metrics: &tracestorepb.MetadataMetrics{}},
+			actualResult:       &tracestorepb.SearchTagsResponse{},
+			sort:               func(m proto.Message) { sort.Strings(m.(*tracestorepb.SearchTagsResponse).TagNames) },
+			expectedShouldQuit: true,
+			limit:              5,
+		},
+		{
+			name:           "SearchTagsV2 - limited",
+			factory:        NewSearchTagsV2,
+			result1:        &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"v1"}}}},
+			result2:        &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"v2", "v1"}}}},
+			expectedResult: &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"v1"}}}, Metrics: &tracestorepb.MetadataMetrics{}},
+			actualResult:   &tracestorepb.SearchTagsV2Response{},
+			sort: func(m proto.Message) {
+				scopes := m.(*tracestorepb.SearchTagsV2Response).Scopes
+				for _, scope := range scopes {
+					sort.Strings(scope.Tags)
+				}
+				sort.Slice(scopes, func(i, j int) bool {
+					return scopes[i].Name < scopes[j].Name
+				})
+			},
+			expectedShouldQuit: true,
+			limit:              2,
+		},
+		{
+			name:               "SearchTagValues - limited",
+			factory:            NewSearchTagValues,
+			result1:            &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1"}},
+			result2:            &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag2", "tag3"}},
+			expectedResult:     &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1"}, Metrics: &tracestorepb.MetadataMetrics{}},
+			actualResult:       &tracestorepb.SearchTagValuesResponse{},
+			sort:               func(m proto.Message) { sort.Strings(m.(*tracestorepb.SearchTagValuesResponse).TagValues) },
+			expectedShouldQuit: true,
+			limit:              5,
+		},
+		{
+			name:           "SearchTagValuesV2 - limited",
+			factory:        NewSearchTagValuesV2,
+			result1:        &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}}},
+			result2:        &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v2", Type: "string"}, {Value: "v3", Type: "string"}}},
+			expectedResult: &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{}},
+			actualResult:   &tracestorepb.SearchTagValuesV2Response{},
+			sort: func(m proto.Message) {
+				sort.Slice(m.(*tracestorepb.SearchTagValuesV2Response).TagValues, func(i, j int) bool {
+					return m.(*tracestorepb.SearchTagValuesV2Response).TagValues[i].Value < m.(*tracestorepb.SearchTagValuesV2Response).TagValues[j].Value
+				})
+			},
+			expectedShouldQuit: true,
+			limit:              10,
+		},
+		// with metrics
+		{
+			name:           "SearchTags - metrics",
+			factory:        NewSearchTags,
+			result1:        &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}},
+			result2:        &tracestorepb.SearchTagsResponse{TagNames: []string{"tag2", "tag3"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}},
+			expectedResult: &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1", "tag2", "tag3"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}},
+			actualResult:   &tracestorepb.SearchTagsResponse{},
+			sort:           func(m proto.Message) { sort.Strings(m.(*tracestorepb.SearchTagsResponse).TagNames) },
+			limit:          100,
+		},
+		{
+			name:           "SearchTagsV2 - metrics",
+			factory:        NewSearchTagsV2,
+			result1:        &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"v1"}}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}},
+			result2:        &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"v2", "v1"}}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}},
+			expectedResult: &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"v1", "v2"}}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}},
+			actualResult:   &tracestorepb.SearchTagsV2Response{},
+			sort: func(m proto.Message) {
+				scopes := m.(*tracestorepb.SearchTagsV2Response).Scopes
+				for _, scope := range scopes {
+					sort.Strings(scope.Tags)
+				}
+				sort.Slice(scopes, func(i, j int) bool {
+					return scopes[i].Name < scopes[j].Name
+				})
+			},
+			limit: 100,
+		},
+		{
+			name:           "SearchTagValues - metrics",
+			factory:        NewSearchTagValues,
+			result1:        &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}},
+			result2:        &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag2", "tag3"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}},
+			expectedResult: &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1", "tag2", "tag3"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}},
+			actualResult:   &tracestorepb.SearchTagValuesResponse{},
+			sort:           func(m proto.Message) { sort.Strings(m.(*tracestorepb.SearchTagValuesResponse).TagValues) },
+			limit:          100,
+		},
+		{
+			name:           "SearchTagValuesV2 - metrics",
+			factory:        NewSearchTagValuesV2,
+			result1:        &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}},
+			result2:        &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v2", Type: "string"}, {Value: "v3", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}},
+			expectedResult: &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}, {Value: "v2", Type: "string"}, {Value: "v3", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}},
+			actualResult:   &tracestorepb.SearchTagValuesV2Response{},
+			sort: func(m proto.Message) {
+				sort.Slice(m.(*tracestorepb.SearchTagValuesV2Response).TagValues, func(i, j int) bool {
+					return m.(*tracestorepb.SearchTagValuesV2Response).TagValues[i].Value < m.(*tracestorepb.SearchTagValuesV2Response).TagValues[j].Value
+				})
+			},
+			limit: 100,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			combiner := tc.factory(tc.limit)
+
+			err := combiner.AddResponse(toHTTPResponse(t, tc.result1, 200))
+			assert.NoError(t, err)
+
+			err = combiner.AddResponse(toHTTPResponse(t, tc.result2, 200))
+			assert.NoError(t, err)
+
+			res, err := combiner.HTTPFinal()
+			require.NoError(t, err)
+
+			assert.Equal(t, 200, res.StatusCode)
+			assert.Equal(t, tc.expectedShouldQuit, combiner.ShouldQuit())
+			assert.Equal(t, 200, combiner.StatusCode())
+
+			fromHTTPResponse(t, res, tc.actualResult)
+			tc.sort(tc.expectedResult)
+			tc.sort(tc.actualResult)
+			require.Equal(t, tc.expectedResult, tc.actualResult)
+
+			require.Equal(t, metrics(tc.expectedResult), metrics(tc.actualResult))
+		})
+	}
+}
+
+func metrics(message proto.Message) *tracestorepb.MetadataMetrics {
+	switch m := message.(type) {
+	case *tracestorepb.SearchTagsResponse:
+		return m.Metrics
+	case *tracestorepb.SearchTagsV2Response:
+		return m.Metrics
+	case *tracestorepb.SearchTagValuesResponse:
+		return m.Metrics
+	case *tracestorepb.SearchTagValuesV2Response:
+		return m.Metrics
+	}
+	return nil
+}
+
+func TestTagsGRPCCombiner(t *testing.T) {
+	c := NewTypedSearchTags(0)
+	res1 := &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	res2 := &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1", "tag2"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	diff1 := &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	diff2 := &tracestorepb.SearchTagsResponse{TagNames: []string{"tag2"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}}
+	expectedFinal := &tracestorepb.SearchTagsResponse{TagNames: []string{"tag1", "tag2"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}}
+	testGRPCCombiner(t, c, res1, res2, diff1, diff2, expectedFinal, func(r *tracestorepb.SearchTagsResponse) { sort.Strings(r.TagNames) })
+}
+
+func TestTagsV2GRPCCombiner(t *testing.T) {
+	c := NewTypedSearchTagsV2(0)
+	res1 := &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"tag1"}}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	res2 := &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"tag1", "tag2"}}, {Name: "scope2", Tags: []string{"tag3"}}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	diff1 := &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"tag1"}}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	diff2 := &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"tag2"}}, {Name: "scope2", Tags: []string{"tag3"}}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}}
+	expectedFinal := &tracestorepb.SearchTagsV2Response{Scopes: []*tracestorepb.SearchTagsV2Scope{{Name: "scope1", Tags: []string{"tag1", "tag2"}}, {Name: "scope2", Tags: []string{"tag3"}}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}}
+	testGRPCCombiner(t, c, res1, res2, diff1, diff2, expectedFinal, func(r *tracestorepb.SearchTagsV2Response) {
+		for _, scope := range r.Scopes {
+			sort.Strings(scope.Tags)
+		}
+		sort.Slice(r.Scopes, func(i, j int) bool {
+			return r.Scopes[i].Name < r.Scopes[j].Name
+		})
+	})
+}
+
+func TestTagValuesGRPCCombiner(t *testing.T) {
+	c := NewTypedSearchTagValues(0)
+	res1 := &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	res2 := &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1", "tag2"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	diff1 := &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	diff2 := &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag2"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}}
+	expectedFinal := &tracestorepb.SearchTagValuesResponse{TagValues: []string{"tag1", "tag2"}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}}
+	testGRPCCombiner(t, c, res1, res2, diff1, diff2, expectedFinal, func(r *tracestorepb.SearchTagValuesResponse) { sort.Strings(r.TagValues) })
+}
+
+func TestTagValuesV2GRPCCombiner(t *testing.T) {
+	c := NewTypedSearchTagValuesV2(0)
+	res1 := &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	res2 := &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}, {Value: "v2", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	diff1 := &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 1}}
+	diff2 := &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v2", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}}
+	expectedFinal := &tracestorepb.SearchTagValuesV2Response{TagValues: []*tracestorepb.TagValue{{Value: "v1", Type: "string"}, {Value: "v2", Type: "string"}}, Metrics: &tracestorepb.MetadataMetrics{InspectedBytes: 2}}
+	testGRPCCombiner(t, c, res1, res2, diff1, diff2, expectedFinal, func(r *tracestorepb.SearchTagValuesV2Response) {
+		sort.Slice(r.TagValues, func(i, j int) bool {
+			return r.TagValues[i].Value < r.TagValues[j].Value
+		})
+	})
+}
+
+func testGRPCCombiner[T proto.Message](t *testing.T, combiner GRPCCombiner[T], result1 T, result2 T, diff1 T, diff2 T, expectedFinal T, sort func(T)) {
+	err := combiner.AddResponse(toHTTPResponse(t, result1, 200))
+	require.NoError(t, err)
+
+	actualDiff1, err := combiner.GRPCDiff()
+	require.NoError(t, err)
+	sort(actualDiff1)
+	require.Equal(t, diff1, actualDiff1)
+
+	err = combiner.AddResponse(toHTTPResponse(t, result2, 200))
+	assert.NoError(t, err)
+
+	actualDiff2, err := combiner.GRPCDiff()
+	require.NoError(t, err)
+	sort(actualDiff2)
+	require.Equal(t, diff2, actualDiff2)
+
+	actualFinal, err := combiner.GRPCFinal()
+	require.NoError(t, err)
+
+	sort(actualFinal)
+	require.Equal(t, expectedFinal, actualFinal)
+}
