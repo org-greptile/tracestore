@@ -1,0 +1,17 @@
+FROM alpine:latest AS ca-certificates
+RUN apk add --update --no-cache ca-certificates
+
+FROM gcr.io/distroless/static-debian12:debug
+
+SHELL ["/busybox/sh", "-c"]
+
+RUN ["/busybox/addgroup", "-g", "10001", "-S", "tracestore"]
+RUN ["/busybox/adduser", "-u", "10001", "-S", "tracestore", "-G", "tracestore"]
+
+ARG TARGETARCH
+COPY bin/linux/tracestore-query-${TARGETARCH} /tracestore-query
+COPY --from=ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+USER 10001:10001
+
+ENTRYPOINT ["/tracestore-query"]

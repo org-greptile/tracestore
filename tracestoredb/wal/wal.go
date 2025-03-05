@@ -1,0 +1,162 @@
+package wal
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
+	"example.com/acme/tracestore/tracestoredb/backend"
+	"example.com/acme/tracestore/tracestoredb/backend/local"
+	"example.com/acme/tracestore/tracestoredb/encoding"
+	"example.com/acme/tracestore/tracestoredb/encoding/common"
+)
+
+const (
+	completedDir = "completed"
+	blocksDir    = "blocks"
+)
+
+type WAL struct {
+	c *Config
+	l *local.Backend
+}
+
+type Config struct {
+	Filepath       string           `yaml:"path"`
+	Encoding       backend.Encoding `yaml:"v2_encoding"`
+	SearchEncoding backend.Encoding `yaml:"search_encoding"`
+	IngestionSlack time.Duration    `yaml:"ingestion_time_range_slack"`
+	Version        string           `yaml:"version,omitempty"`
+}
+
+func (c *Config) RegisterFlags(*flag.FlagSet) {
+	c.IngestionSlack = 2 * time.Minute
+}
+
+func (c *Config) Validate() error {
+	if _, err := encoding.FromVersion(c.Version); err != nil {
+		return fmt.Errorf("failed to validate block version %s: %w", c.Version, err)
+	}
+
+	return nil
+}
+
+func New(c *Config) (*WAL, error) {
+	if c.Filepath == "" {
+		return nil, fmt.Errorf("please provide a path for the WAL")
+	}
+
+	// make folder
+	err := os.MkdirAll(c.Filepath, 0o700)
+	if err != nil {
+		return nil, err
+	}
+
+	// Setup local backend in /blocks/
+	blocksFolderPath := filepath.Join(c.Filepath, blocksDir)
+	err = os.MkdirAll(blocksFolderPath, 0o700)
+	if err != nil {
+		return nil, err
+	}
+
+	l, err := local.NewBackend(&local.Config{
+		Path: blocksFolderPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &WAL{
+		c: c,
+		l: l,
+	}, nil
+}
+
+// RescanBlocks returns a slice of append blocks from the wal folder
+func (w *WAL) RescanBlocks(additionalStartSlack time.Duration, log log.Logger) ([]common.WALBlock, error) {
+	files, err := os.ReadDir(w.c.Filepath)
+	if err != nil {
+		return nil, err
+	}
+
+	encodings := encoding.AllEncodings()
+	blocks := make([]common.WALBlock, 0, len(files))
+	for _, f := range files {
+		// find owner
+		var owner encoding.VersionedEncoding
+		for _, e := range encodings {
+			if e.OwnsWALBlock(f) {
+				owner = e
+				break
+			}
+		}
+
+		if owner == nil {
+			level.Warn(log).Log("msg", "unowned file entry ignored during wal replay", "file", f.Name(), "err", err)
+			continue
+		}
+
+		start := time.Now()
+		fileInfo, err := f.Info()
+		if err != nil {
+			return nil, err
+		}
+
+		level.Info(log).Log("msg", "beginning replay", "file", f.Name(), "size", fileInfo.Size())
+		b, warning, err := owner.OpenWALBlock(f.Name(), w.c.Filepath, w.c.IngestionSlack, additionalStartSlack)
+
+		remove := false
+		if err != nil {
+			// wal replay failed, clear and warn
+			level.Warn(log).Log("msg", "failed to replay block. removing.", "file", f.Name(), "err", err)
+			remove = true
+		}
+
+		if b != nil && b.DataLength() == 0 {
+			level.Warn(log).Log("msg", "empty wal file. ignoring.", "file", f.Name(), "err", err)
+			remove = true
+		}
+
+		if warning != nil {
+			level.Warn(log).Log("msg", "received warning while replaying block. partial replay likely.", "file", f.Name(), "warning", warning, "length", b.DataLength())
+		}
+
+		if remove {
+			err = os.RemoveAll(filepath.Join(w.c.Filepath, f.Name()))
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		level.Info(log).Log("msg", "replay complete", "file", f.Name(), "duration", time.Since(start))
+
+		blocks = append(blocks, b)
+	}
+
+	return blocks, nil
+}
+
+func (w *WAL) NewBlock(meta *backend.BlockMeta, dataEncoding string) (common.WALBlock, error) {
+	v, err := encoding.FromVersion(w.c.Version)
+	if err != nil {
+		return nil, err
+	}
+	return v.CreateWALBlock(meta, w.c.Filepath, dataEncoding, w.c.IngestionSlack)
+}
+
+func (w *WAL) GetFilepath() string {
+	return w.c.Filepath
+}
+
+func (w *WAL) Clear() error {
+	return os.RemoveAll(w.c.Filepath)
+}
+
+func (w *WAL) LocalBackend() *local.Backend {
+	return w.l
+}

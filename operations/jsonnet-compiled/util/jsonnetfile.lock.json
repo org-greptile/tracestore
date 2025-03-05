@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "dependencies": [
+    {
+      "source": {
+        "git": {
+          "remote": "https://example.com/acme/jsonnet-libs.git",
+          "subdir": "ksonnet-util"
+        }
+      },
+      "version": "39bc80b6c67e08f6fec0d1edfdfdf908cecf66a7",
+      "sum": "0y3AFX9LQSpfWTxWKSwoLgbt0Wc9nnCwhMH2szKzHv0="
+    },
+    {
+      "source": {
+        "git": {
+          "remote": "https://example.com/acme/jsonnet-libs.git",
+          "subdir": "memcached"
+        }
+      },
+      "version": "39bc80b6c67e08f6fec0d1edfdfdf908cecf66a7",
+      "sum": "Cc715Y3rgTuimgDFIw+FaKzXSJGRYwt1pFTMbdrNBD8="
+    },
+    {
+      "source": {
+        "git": {
+          "remote": "https://github.com/jsonnet-libs/k8s-libsonnet.git",
+          "subdir": "1.29"
+        }
+      },
+      "version": "f8b0d65c573f3b36040258fa69e90e13e7129083",
+      "sum": "i2w3hGbgQmaB73t5LJHSioPOVdYv8ZBvivHiDwZJVyI="
+    },
+    {
+      "source": {
+        "git": {
+          "remote": "https://github.com/ksonnet/ksonnet-lib.git",
+          "subdir": "ksonnet.beta.4"
+        }
+      },
+      "version": "0d2f82676817bbf9e4acf6495b2090205f323b9f",
+      "sum": "ur22hPQq0JAPBxm8hNMcwjumj4MkozDwOKiGZvVMYh4="
+    },
+    {
+      "source": {
+        "local": {
+          "directory": "../../jsonnet/microservices"
+        }
+      },
+      "version": ""
+    }
+  ],
+  "legacyImports": false
+}

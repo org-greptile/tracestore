@@ -1,0 +1,74 @@
+package client
+
+import (
+	"flag"
+	"io"
+	"time"
+
+	"example.com/acme/kit/grpcclient"
+	"example.com/acme/kit/middleware"
+	ring_client "example.com/acme/kit/ring/client"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health/grpc_health_v1"
+
+	"example.com/acme/tracestore/pkg/tracestorepb"
+)
+
+// Config for an ingester client.
+type Config struct {
+	PoolConfig       ring_client.PoolConfig `yaml:"pool_config,omitempty"`
+	RemoteTimeout    time.Duration          `yaml:"remote_timeout,omitempty"`
+	GRPCClientConfig grpcclient.Config      `yaml:"grpc_client_config"`
+}
+
+type Client struct {
+	tracestorepb.PusherClient
+	tracestorepb.QuerierClient
+	grpc_health_v1.HealthClient
+	io.Closer
+}
+
+// RegisterFlags registers flags.
+func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
+	cfg.GRPCClientConfig.RegisterFlagsWithPrefix("ingester.client", f)
+
+	f.DurationVar(&cfg.PoolConfig.HealthCheckTimeout, "ingester.client.healthcheck-timeout", 1*time.Second, "Timeout for healthcheck rpcs.")
+	f.DurationVar(&cfg.PoolConfig.CheckInterval, "ingester.client.healthcheck-interval", 15*time.Second, "Interval to healthcheck ingesters")
+	f.BoolVar(&cfg.PoolConfig.HealthCheckEnabled, "ingester.client.healthcheck-enabled", true, "Healthcheck ingesters.")
+	f.DurationVar(&cfg.RemoteTimeout, "ingester.client.timeout", 5*time.Second, "Timeout for ingester client RPCs.")
+}
+
+// New returns a new ingester client.
+func New(addr string, cfg Config) (*Client, error) {
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+	}
+
+	instrumentationOpts, err := cfg.GRPCClientConfig.DialOption(instrumentation())
+	if err != nil {
+		return nil, err
+	}
+
+	opts = append(opts, instrumentationOpts...)
+	conn, err := grpc.Dial(addr, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		PusherClient:  tracestorepb.NewPusherClient(conn),
+		QuerierClient: tracestorepb.NewQuerierClient(conn),
+		HealthClient:  grpc_health_v1.NewHealthClient(conn),
+		Closer:        conn,
+	}, nil
+}
+
+func instrumentation() ([]grpc.UnaryClientInterceptor, []grpc.StreamClientInterceptor) {
+	return []grpc.UnaryClientInterceptor{
+			middleware.ClientUserHeaderInterceptor,
+		}, []grpc.StreamClientInterceptor{
+			middleware.StreamClientUserHeaderInterceptor,
+		}
+}
