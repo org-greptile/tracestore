@@ -2,6 +2,7 @@
 
 * [FEATURE] TraceQL support for event scope and event:name intrinsic [#3708](https://example.com/acme/tracestore/pull/3708) (@stoewer)
 * [FEATURE] Flush blocks to storage from the metrics-generator [#3628](https://example.com/acme/tracestore/pull/3628) [#3691](https://example.com/acme/tracestore/pull/3691) (@mapno)
+* [ENHANCEMENT] Tag value lookup use protobuf internally for improved latency [#3731](https://example.com/acme/tracestore/pull/3731) (@mdisibio)
 * [ENHANCEMENT] Improve use of OTEL semantic conventions on the service graph [#3711](https://example.com/acme/tracestore/pull/3711) (@zalegrala)
 * [ENHANCEMENT] Performance improvement for `rate() by ()` queries [#3719](https://example.com/acme/tracestore/pull/3719) (@mapno)
 
