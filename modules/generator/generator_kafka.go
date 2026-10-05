@@ -10,7 +10,6 @@ import (
 	"github.com/go-kit/log/level"
 
 	"example.com/acme/tracestore/pkg/ingest"
-	"example.com/acme/tracestore/pkg/tracestorepb"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -145,9 +144,7 @@ func (g *Generator) readCh(ctx context.Context) {
 				continue
 			}
 
-			i.pushSpansFromQueue(ctx, r.Timestamp, &tracestorepb.PushSpansRequest{
-				Batches: resourceSpans,
-			})
+			i.pushSpansFromQueue(ctx, r.Timestamp, resourceSpans)
 		}
 	}
 }
