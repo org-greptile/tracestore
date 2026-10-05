@@ -44,6 +44,7 @@ To make use of filtering, configure `autocomplete_filtering_enabled`.
 * [ENHANCEMENT] Add span filtering to spanmetrics processor [#2274](https://example.com/acme/tracestore/pull/2274) (@zalegrala)
 * [ENHANCEMENT] Add ability to detect virtual nodes in the servicegraph processor [#2365](https://example.com/acme/tracestore/pull/2365) (@mapno)
 * [ENHANCEMENT] Introduce `overrides.Interface` to decouple implementation from usage [#2482](https://example.com/acme/tracestore/pull/2482) (@kvrhdn)
+* [ENHANCEMENT] Improve TraceQL throughput by asynchronously creating jobs [#2530](https://example.com/acme/tracestore/pull/2530) (@joe-elliott)
 * [BUGFIX] tracestoredb integer divide by zero error [#2167](https://example.com/acme/tracestore/issues/2167) (@kroksys)
 * [BUGFIX] metrics-generator: ensure Prometheus will scale up shards when remote write is lagging behind [#2463](https://example.com/acme/tracestore/issues/2463) (@kvrhdn)
 * [BUGFIX] Fixes issue where matches and other spanset level attributes were not persisted to the TraceQL results. [#2490](https://example.com/acme/tracestore/pull/2490) 
