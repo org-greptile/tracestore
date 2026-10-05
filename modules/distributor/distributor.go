@@ -33,6 +33,7 @@ import (
 	"example.com/acme/tracestore/modules/distributor/forwarder"
 	"example.com/acme/tracestore/modules/distributor/receiver"
 	"example.com/acme/tracestore/modules/distributor/usage"
+	"example.com/acme/tracestore/modules/generator"
 	generator_client "example.com/acme/tracestore/modules/generator/client"
 	ingester_client "example.com/acme/tracestore/modules/ingester/client"
 	"example.com/acme/tracestore/modules/overrides"
@@ -559,7 +560,7 @@ func (d *Distributor) sendToIngestersViaBytes(ctx context.Context, userID string
 	return nil
 }
 
-func (d *Distributor) sendToGenerators(ctx context.Context, userID string, keys []uint32, traces []*rebatchedTrace) error {
+func (d *Distributor) sendToGenerators(ctx context.Context, userID string, keys []uint32, traces []*rebatchedTrace, noGenerateMetrics bool) error {
 	// If an instance is unhealthy write to the next one (i.e. write extend is enabled)
 	op := ring.Write
 
@@ -571,7 +572,8 @@ func (d *Distributor) sendToGenerators(ctx context.Context, userID string, keys 
 		localCtx = user.InjectOrgID(localCtx, userID)
 
 		req := tracestorepb.PushSpansRequest{
-			Batches: nil,
+			Batches:               nil,
+			SkipMetricsGeneration: noGenerateMetrics,
 		}
 		for _, j := range indexes {
 			req.Batches = append(req.Batches, traces[j].trace.ResourceSpans...)
@@ -627,8 +629,9 @@ func (d *Distributor) sendToKafka(ctx context.Context, userID string, keys []uin
 		localCtx = user.InjectOrgID(localCtx, userID)
 
 		req := &tracestorepb.PushBytesRequest{
-			Traces: make([]tracestorepb.PreallocBytes, len(indexes)),
-			Ids:    make([][]byte, len(indexes)),
+			Traces:                make([]tracestorepb.PreallocBytes, len(indexes)),
+			Ids:                   make([][]byte, len(indexes)),
+			SkipMetricsGeneration: generator.ExtractNoGenerateMetrics(ctx),
 		}
 
 		for i, j := range indexes {
