@@ -11,6 +11,7 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"example.com/acme/tracestore/pkg/api"
+	tracestore_io "example.com/acme/tracestore/pkg/io"
 	"example.com/acme/tracestore/pkg/model/trace"
 	"example.com/acme/tracestore/pkg/tracestorepb"
 )
@@ -67,7 +68,7 @@ func (c *traceByIDCombiner) AddResponse(r PipelineResponse) error {
 	}
 
 	// Read the body
-	buff, err := io.ReadAll(res.Body)
+	buff, err := tracestore_io.ReadAllWithEstimate(res.Body, res.ContentLength)
 	if err != nil {
 		c.statusMessage = internalErrorMsg
 		return fmt.Errorf("error reading response body: %w", err)
